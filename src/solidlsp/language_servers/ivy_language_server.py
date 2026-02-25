@@ -1,12 +1,10 @@
-"""
-Provides Ivy specific instantiation of the LanguageServer class using ivy_lsp.
-Contains various configurations and settings specific to the Ivy formal verification language.
-"""
+"""Ivy language server integration for the SolidLSP framework."""
 
 import logging
 import os
 import pathlib
 import shutil
+import threading
 
 from solidlsp.ls import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
@@ -23,19 +21,6 @@ class IvyLanguageServer(SolidLanguageServer):
     Ivy is a formal verification language used for protocol modeling and verification.
     """
 
-    _diagnostics_store: dict[str, list[dict[str, object]]] = {}
-    """Stores the latest publishDiagnostics notifications keyed by file URI."""
-
-    @classmethod
-    def get_stored_diagnostics(cls, uri: str) -> list[dict[str, object]]:
-        """Return stored diagnostics for the given URI, or empty list."""
-        return cls._diagnostics_store.get(uri, [])
-
-    @classmethod
-    def get_all_stored_diagnostics(cls) -> dict[str, list[dict[str, object]]]:
-        """Return all stored diagnostics keyed by URI."""
-        return dict(cls._diagnostics_store)
-
     def __init__(
         self,
         config: LanguageServerConfig,
@@ -46,6 +31,9 @@ class IvyLanguageServer(SolidLanguageServer):
         Creates an IvyLanguageServer instance. This class is not meant to be
         instantiated directly. Use LanguageServer.create() instead.
         """
+        self._diagnostics_store: dict[str, list[dict[str, object]]] = {}
+        self._diagnostics_lock = threading.Lock()
+
         ivy_lsp_cmd = self._find_ivy_lsp()
         include_paths = os.environ.get("IVY_LSP_INCLUDE_PATHS", "")
         exclude_paths = os.environ.get("IVY_LSP_EXCLUDE_PATHS", "submodules,test")
@@ -63,6 +51,16 @@ class IvyLanguageServer(SolidLanguageServer):
             "ivy",
             solidlsp_settings,
         )
+
+    def get_stored_diagnostics(self, uri: str) -> list[dict[str, object]]:
+        """Return stored diagnostics for the given URI, or empty list (defensive copy)."""
+        with self._diagnostics_lock:
+            return list(self._diagnostics_store.get(uri, []))
+
+    def get_all_stored_diagnostics(self) -> dict[str, list[dict[str, object]]]:
+        """Return all stored diagnostics keyed by URI (defensive copy)."""
+        with self._diagnostics_lock:
+            return {uri: list(diags) for uri, diags in self._diagnostics_store.items()}
 
     @staticmethod
     def _find_ivy_lsp() -> str:
@@ -141,6 +139,7 @@ class IvyLanguageServer(SolidLanguageServer):
         """
 
         def register_capability_handler(params):
+            log.debug("ivy_lsp requested client/registerCapability: %s", params)
             return
 
         def window_log_message(msg):
@@ -151,11 +150,20 @@ class IvyLanguageServer(SolidLanguageServer):
 
         def store_diagnostics(params):
             """Capture publishDiagnostics notifications for later querying."""
-            if isinstance(params, dict):
-                uri = params.get("uri", "")
-                diags = params.get("diagnostics", [])
-                self.__class__._diagnostics_store[uri] = diags
-                log.debug(f"Stored {len(diags)} diagnostics for {uri}")
+            if not isinstance(params, dict):
+                log.warning(
+                    "Received non-dict publishDiagnostics params (type=%s), ignoring.",
+                    type(params).__name__,
+                )
+                return
+            uri = params.get("uri", "")
+            if not uri:
+                log.warning("Received publishDiagnostics with empty URI, ignoring.")
+                return
+            diags = params.get("diagnostics", [])
+            with self._diagnostics_lock:
+                self._diagnostics_store[uri] = diags
+            log.debug(f"Stored {len(diags)} diagnostics for {uri}")
 
         self.server.on_request("client/registerCapability", register_capability_handler)
         self.server.on_notification("window/logMessage", window_log_message)
@@ -171,7 +179,10 @@ class IvyLanguageServer(SolidLanguageServer):
         log.debug(f"Received initialize response from ivy_lsp server: {init_response}")
 
         capabilities = init_response.get("capabilities", {})
-        assert "textDocumentSync" in capabilities, "ivy_lsp did not report textDocumentSync capability"
+        if "textDocumentSync" not in capabilities:
+            raise RuntimeError(
+                "ivy_lsp did not report textDocumentSync capability. " "Check that ivy_lsp is correctly installed and up to date."
+            )
 
         for cap_name in [
             "completionProvider",

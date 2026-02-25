@@ -246,11 +246,28 @@ class IvyDiagnosticsTool(Tool, ToolMarkerOptional):
             IvyLanguageServer,
         )
 
+        ls_manager = self.agent.get_language_server_manager_or_raise()
+        # Resolve the Ivy language server instance. When a relative_path is
+        # given we can look it up directly; otherwise fall back to the first
+        # IvyLanguageServer found in the manager.
+        ivy_ls: IvyLanguageServer | None = None
+        if relative_path is not None:
+            ls = ls_manager.get_language_server(relative_path)
+            if isinstance(ls, IvyLanguageServer):
+                ivy_ls = ls
+        if ivy_ls is None:
+            for ls in ls_manager._language_servers.values():
+                if isinstance(ls, IvyLanguageServer):
+                    ivy_ls = ls
+                    break
+        if ivy_ls is None:
+            return json.dumps({"error": "No Ivy language server is active."})
+
         if relative_path is not None:
             project_root = self.get_project_root()
             abs_path = os.path.join(project_root, relative_path)
             uri = "file://" + abs_path
-            diags = IvyLanguageServer.get_stored_diagnostics(uri)
+            diags = ivy_ls.get_stored_diagnostics(uri)
             result = json.dumps(
                 {
                     "file": relative_path,
@@ -259,7 +276,7 @@ class IvyDiagnosticsTool(Tool, ToolMarkerOptional):
                 }
             )
         else:
-            all_diags = IvyLanguageServer.get_all_stored_diagnostics()
+            all_diags = ivy_ls.get_all_stored_diagnostics()
             summary: dict[str, Any] = {}
             for uri, diags in all_diags.items():
                 filepath = uri.replace("file://", "")
