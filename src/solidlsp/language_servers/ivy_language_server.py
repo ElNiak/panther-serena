@@ -34,11 +34,20 @@ class IvyLanguageServer(SolidLanguageServer):
         instantiated directly. Use LanguageServer.create() instead.
         """
         ivy_lsp_cmd = self._find_ivy_lsp(logger)
+        include_paths = os.environ.get("IVY_LSP_INCLUDE_PATHS", "")
+        exclude_paths = os.environ.get("IVY_LSP_EXCLUDE_PATHS", "submodules,test")
         super().__init__(
             config,
             logger,
             repository_root_path,
-            ProcessLaunchInfo(cmd=ivy_lsp_cmd, cwd=repository_root_path),
+            ProcessLaunchInfo(
+                cmd=ivy_lsp_cmd,
+                cwd=repository_root_path,
+                env={
+                    "IVY_LSP_INCLUDE_PATHS": include_paths,
+                    "IVY_LSP_EXCLUDE_PATHS": exclude_paths,
+                },
+            ),
             "ivy",
             solidlsp_settings,
         )
@@ -148,9 +157,7 @@ class IvyLanguageServer(SolidLanguageServer):
         )
 
         capabilities = init_response.get("capabilities", {})
-        assert "textDocumentSync" in capabilities, (
-            "ivy_lsp did not report textDocumentSync capability"
-        )
+        assert "textDocumentSync" in capabilities, "ivy_lsp did not report textDocumentSync capability"
 
         for cap_name in [
             "completionProvider",
