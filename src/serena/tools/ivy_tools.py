@@ -6,16 +6,41 @@ ivy_show) through the Serena tool framework, enabling LLM agents to perform
 formal verification tasks on Ivy models.
 """
 
+import json
 import os
 import os.path
+import re
+import time
+from typing import Any
 
-from serena.tools import Tool, ToolMarkerOptional
+from serena.tools import Tool, ToolMarkerOptional, ToolMarkerSymbolicRead
 from serena.util.shell import execute_shell_command
+
+
+def _parse_ivy_check_output(output: str) -> list[dict[str, Any]]:
+    """Parse ivy_check stderr/stdout into structured diagnostics.
+
+    Looks for lines matching: filename:LINE: error|warning: message
+    Returns a list of dicts with file, line, severity, message keys.
+    """
+    diagnostics: list[dict[str, Any]] = []
+    for line in output.splitlines():
+        m = re.match(r"(.*?):(\d+):\s*(error|warning):\s*(.*)", line)
+        if m:
+            diagnostics.append({
+                "file": m.group(1),
+                "line": int(m.group(2)),
+                "severity": m.group(3),
+                "message": m.group(4),
+            })
+    return diagnostics
 
 
 class IvyCheckTool(Tool, ToolMarkerOptional):
     """
     Runs ivy_check on an Ivy source file to verify its formal properties.
+    Returns structured diagnostics with file, line, severity, and message
+    for each issue found.
     """
 
     def apply(
@@ -28,6 +53,9 @@ class IvyCheckTool(Tool, ToolMarkerOptional):
         Runs ivy_check on the specified Ivy file to perform formal verification.
         This checks isolate assumptions, invariants, and safety properties.
 
+        Returns structured JSON with a diagnostics array containing file, line,
+        severity (error/warning), and message for each issue found.
+
         IMPORTANT: The file must be an .ivy file within the active project.
 
         :param relative_path: relative path to the .ivy file to check
@@ -36,8 +64,8 @@ class IvyCheckTool(Tool, ToolMarkerOptional):
         :param max_answer_chars: if the output is longer than this number of
             characters, no content will be returned. -1 means using the
             default value.
-        :return: a JSON object containing the ivy_check output with stdout,
-            stderr, and return code
+        :return: a JSON object with success, diagnostics array, raw_output,
+            and duration_seconds
         """
         project_root = self.get_project_root()
         abs_path = os.path.join(project_root, relative_path)
@@ -55,10 +83,26 @@ class IvyCheckTool(Tool, ToolMarkerOptional):
         if isolate is not None:
             command = f"ivy_check isolate={isolate} {relative_path}"
 
+        start = time.monotonic()
         result = execute_shell_command(
             command, cwd=project_root, capture_stderr=True
         )
-        return self._limit_length(result.json(), max_answer_chars)
+        duration = time.monotonic() - start
+
+        raw_output = result.stdout + "\n" + (result.stderr or "")
+        diagnostics = _parse_ivy_check_output(raw_output)
+
+        structured = json.dumps({
+            "success": result.return_code == 0,
+            "diagnostics": diagnostics,
+            "diagnostic_count": len(diagnostics),
+            "error_count": sum(1 for d in diagnostics if d["severity"] == "error"),
+            "warning_count": sum(1 for d in diagnostics if d["severity"] == "warning"),
+            "raw_output": raw_output.strip(),
+            "return_code": result.return_code,
+            "duration_seconds": round(duration, 2),
+        })
+        return self._limit_length(structured, max_answer_chars)
 
 
 class IvyCompileTool(Tool, ToolMarkerOptional):
@@ -111,7 +155,7 @@ class IvyCompileTool(Tool, ToolMarkerOptional):
         result = execute_shell_command(
             command, cwd=project_root, capture_stderr=True
         )
-        return self._limit_length(result.json(), max_answer_chars)
+        return self._limit_length(result.model_dump_json(), max_answer_chars)
 
 
 class IvyModelInfoTool(Tool, ToolMarkerOptional):
@@ -161,4 +205,387 @@ class IvyModelInfoTool(Tool, ToolMarkerOptional):
         result = execute_shell_command(
             command, cwd=project_root, capture_stderr=True
         )
-        return self._limit_length(result.json(), max_answer_chars)
+        return self._limit_length(result.model_dump_json(), max_answer_chars)
+
+
+class IvyDiagnosticsTool(Tool, ToolMarkerOptional):
+    """
+    Returns cached LSP diagnostics for an Ivy file without running ivy_check.
+    Diagnostics are captured from the Ivy language server's publishDiagnostics
+    notifications (structural issues, parse errors, requirement analysis).
+    """
+
+    def apply(
+        self,
+        relative_path: str | None = None,
+        max_answer_chars: int = -1,
+    ) -> str:
+        """
+        Returns cached diagnostics from the Ivy language server for a specific
+        file or all files. These include structural checks (missing #lang,
+        unmatched braces, unresolved includes) and parse errors, without running
+        the expensive ivy_check subprocess.
+
+        :param relative_path: optional relative path to an .ivy file. If omitted,
+            returns diagnostics for all files that have been opened.
+        :param max_answer_chars: if the output is longer than this number of
+            characters, no content will be returned. -1 means using the
+            default value.
+        :return: a JSON object with diagnostics per file
+        """
+        from solidlsp.language_servers.ivy_language_server import (
+            IvyLanguageServer,
+        )
+
+        if relative_path is not None:
+            project_root = self.get_project_root()
+            abs_path = os.path.join(project_root, relative_path)
+            uri = "file://" + abs_path
+            diags = IvyLanguageServer.get_stored_diagnostics(uri)
+            result = json.dumps({
+                "file": relative_path,
+                "diagnostics": diags,
+                "diagnostic_count": len(diags),
+            })
+        else:
+            all_diags = IvyLanguageServer.get_all_stored_diagnostics()
+            summary: dict[str, Any] = {}
+            for uri, diags in all_diags.items():
+                filepath = uri.replace("file://", "")
+                summary[filepath] = {
+                    "diagnostics": diags,
+                    "diagnostic_count": len(diags),
+                }
+            result = json.dumps({
+                "files": summary,
+                "total_files": len(summary),
+            })
+
+        return self._limit_length(result, max_answer_chars)
+
+
+def _check_structural_issues(source: str, filepath: str) -> list[dict[str, Any]]:
+    """Check for structural problems in Ivy source without full parsing.
+
+    Checks:
+    1. Missing #lang ivy1.7 header
+    2. Unmatched braces (with depth tracking)
+    3. Unresolved includes (basic file existence check)
+    """
+    diags: list[dict[str, Any]] = []
+    lines = source.split("\n")
+
+    # 1. Missing #lang header
+    stripped = source.lstrip()
+    if not stripped.startswith("#lang"):
+        diags.append({
+            "line": 1,
+            "severity": "warning",
+            "message": "Missing '#lang ivy1.7' header",
+            "source": "ivy-lint",
+        })
+
+    # 2. Unmatched braces
+    depth = 0
+    for i, line_text in enumerate(lines):
+        if line_text.strip().startswith("#lang"):
+            code = line_text
+        else:
+            code = line_text.split("#")[0]
+        for ch in code:
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+            if depth < 0:
+                diags.append({
+                    "line": i + 1,
+                    "severity": "error",
+                    "message": "Unmatched closing brace",
+                    "source": "ivy-lint",
+                })
+                depth = 0
+    if depth > 0:
+        diags.append({
+            "line": len(lines),
+            "severity": "error",
+            "message": f"Unmatched opening brace ({depth} unclosed)",
+            "source": "ivy-lint",
+        })
+
+    # 3. Unresolved includes (check if file exists in same directory)
+    parent_dir = os.path.dirname(filepath)
+    for match in re.finditer(r"^include\s+(\w+)", source, re.MULTILINE):
+        inc_name = match.group(1)
+        candidate = os.path.join(parent_dir, inc_name + ".ivy")
+        if not os.path.isfile(candidate):
+            line_no = source[: match.start()].count("\n") + 1
+            diags.append({
+                "line": line_no,
+                "severity": "warning",
+                "message": f"Unresolved include: {inc_name} (not found in same directory)",
+                "source": "ivy-lint",
+            })
+
+    return diags
+
+
+class IvyLintTool(Tool, ToolMarkerOptional):
+    """
+    Performs fast structural linting on an Ivy file without running ivy_check.
+    Checks for missing #lang header, unmatched braces, and unresolved includes.
+    Much faster than ivy_check (milliseconds vs seconds/minutes).
+    """
+
+    def apply(
+        self,
+        relative_path: str,
+        max_answer_chars: int = -1,
+    ) -> str:
+        """
+        Performs fast structural lint checks on the specified Ivy file.
+        This catches common errors (missing #lang header, unmatched braces,
+        unresolved includes) in milliseconds, without spawning the expensive
+        ivy_check subprocess.
+
+        Use this for quick validation before running full ivy_check verification.
+
+        IMPORTANT: The file must be an .ivy file within the active project.
+
+        :param relative_path: relative path to the .ivy file to lint
+        :param max_answer_chars: if the output is longer than this number of
+            characters, no content will be returned. -1 means using the
+            default value.
+        :return: a JSON object with diagnostics array (line, severity, message)
+        """
+        project_root = self.get_project_root()
+        abs_path = os.path.join(project_root, relative_path)
+
+        if not os.path.isfile(abs_path):
+            raise FileNotFoundError(
+                f"Ivy file not found: {relative_path}"
+            )
+        if not relative_path.endswith(".ivy"):
+            raise ValueError(
+                f"Expected an .ivy file, got: {relative_path}"
+            )
+
+        with open(abs_path, encoding="utf-8", errors="replace") as f:
+            source = f.read()
+
+        diagnostics = _check_structural_issues(source, abs_path)
+
+        result = json.dumps({
+            "file": relative_path,
+            "diagnostics": diagnostics,
+            "diagnostic_count": len(diagnostics),
+            "error_count": sum(
+                1 for d in diagnostics if d["severity"] == "error"
+            ),
+            "warning_count": sum(
+                1 for d in diagnostics if d["severity"] == "warning"
+            ),
+        })
+        return self._limit_length(result, max_answer_chars)
+
+
+class IvyGotoDefinitionTool(Tool, ToolMarkerSymbolicRead, ToolMarkerOptional):
+    """
+    Goes to the definition of a symbol at a given position in an Ivy file.
+    Delegates to the Ivy language server's textDocument/definition request
+    to follow symbols across include boundaries.
+    """
+
+    def apply(
+        self,
+        relative_path: str,
+        line: int,
+        column: int = 0,
+        max_answer_chars: int = -1,
+    ) -> str:
+        """
+        Resolves the definition location of a symbol at the given position.
+        This follows symbols across include boundaries, enabling navigation
+        of Ivy models that span multiple files.
+
+        IMPORTANT: Requires the Ivy language server to be running.
+
+        :param relative_path: relative path to the .ivy file containing the symbol
+        :param line: the 0-based line number of the symbol
+        :param column: the 0-based column number of the symbol (default: 0)
+        :param max_answer_chars: if the output is longer than this number of
+            characters, no content will be returned. -1 means using the
+            default value.
+        :return: a JSON object with definition locations (file, line, column)
+        """
+        if not self.agent.is_using_language_server():
+            raise RuntimeError(
+                "Language server not available. "
+                "IvyGotoDefinitionTool requires an active Ivy language server."
+            )
+
+        language_server = self.agent.language_server
+        assert language_server is not None
+
+        locations = language_server.request_definition(
+            relative_path, line, column
+        )
+
+        definitions = []
+        for loc in locations:
+            loc_range = loc.get("range", {})
+            start = loc_range.get("start", {})
+            definition = {
+                "file": loc.get("relativePath", loc.get("absolutePath", "")),
+                "line": start.get("line", 0),
+                "column": start.get("character", 0),
+                "uri": loc.get("uri", ""),
+            }
+            # Include a few lines of context from the target file
+            target_path = loc.get("relativePath")
+            if target_path:
+                try:
+                    project_root = self.get_project_root()
+                    target_abs = os.path.join(project_root, target_path)
+                    if os.path.isfile(target_abs):
+                        with open(target_abs, encoding="utf-8", errors="replace") as f:
+                            target_lines = f.readlines()
+                        target_line = start.get("line", 0)
+                        start_ctx = max(0, target_line - 1)
+                        end_ctx = min(len(target_lines), target_line + 4)
+                        definition["context"] = "".join(
+                            target_lines[start_ctx:end_ctx]
+                        ).rstrip()
+                except Exception:
+                    pass
+            definitions.append(definition)
+
+        result = json.dumps({
+            "source": f"{relative_path}:{line}:{column}",
+            "definitions": definitions,
+            "definition_count": len(definitions),
+        })
+        return self._limit_length(result, max_answer_chars)
+
+
+class IvyIncludeGraphTool(Tool, ToolMarkerOptional):
+    """
+    Exposes the include dependency graph for Ivy files.
+    Scans .ivy files for 'include' directives and returns which files
+    include which, enabling agents to understand cross-file dependencies.
+    """
+
+    def apply(
+        self,
+        relative_path: str | None = None,
+        max_answer_chars: int = -1,
+    ) -> str:
+        """
+        Returns the include dependency graph for Ivy files in the project.
+        If a specific file is given, returns its direct includes and files
+        that include it. If no file is given, returns the full graph.
+
+        IMPORTANT: Scans .ivy files in the project for 'include' directives.
+
+        :param relative_path: optional relative path to a specific .ivy file.
+            If provided, returns includes/included_by for that file only.
+            If omitted, returns the full project include graph.
+        :param max_answer_chars: if the output is longer than this number of
+            characters, no content will be returned. -1 means using the
+            default value.
+        :return: a JSON object describing the include dependency graph
+        """
+        project_root = self.get_project_root()
+
+        # Build the full include graph by scanning all .ivy files
+        graph: dict[str, list[str]] = {}  # file -> list of included module names
+        file_by_basename: dict[str, str] = {}  # module name -> relative path
+
+        for dirpath, _dirnames, filenames in os.walk(project_root):
+            # Skip common non-source directories
+            rel_dir = os.path.relpath(dirpath, project_root)
+            if any(
+                part in {".git", ".venv", "venv", "node_modules",
+                         "__pycache__", "build", "dist", "submodules"}
+                for part in rel_dir.split(os.sep)
+            ):
+                continue
+
+            for fname in filenames:
+                if not fname.endswith(".ivy"):
+                    continue
+                rel_path = os.path.relpath(
+                    os.path.join(dirpath, fname), project_root
+                )
+                basename = fname[:-4]  # strip .ivy
+                file_by_basename[basename] = rel_path
+
+                abs_file = os.path.join(dirpath, fname)
+                try:
+                    with open(abs_file, encoding="utf-8", errors="replace") as f:
+                        source = f.read()
+                except OSError:
+                    continue
+
+                includes = re.findall(
+                    r"^include\s+(\w+)", source, re.MULTILINE
+                )
+                graph[rel_path] = includes
+
+        if relative_path is not None:
+            # Return focused view for a single file
+            includes = graph.get(relative_path, [])
+            resolved_includes = []
+            for inc in includes:
+                resolved_path = file_by_basename.get(inc)
+                resolved_includes.append({
+                    "module": inc,
+                    "resolved_path": resolved_path,
+                })
+
+            # Find files that include this one
+            target_basename = os.path.basename(relative_path)
+            if target_basename.endswith(".ivy"):
+                target_basename = target_basename[:-4]
+
+            included_by = []
+            for file_path, file_includes in graph.items():
+                if target_basename in file_includes:
+                    included_by.append(file_path)
+
+            # Compute transitive includes
+            transitive: set[str] = set()
+            stack = list(includes)
+            while stack:
+                mod = stack.pop()
+                if mod in transitive:
+                    continue
+                transitive.add(mod)
+                mod_path = file_by_basename.get(mod)
+                if mod_path and mod_path in graph:
+                    stack.extend(graph[mod_path])
+
+            result = json.dumps({
+                "file": relative_path,
+                "includes": resolved_includes,
+                "included_by": included_by,
+                "transitive_includes": sorted(transitive),
+                "transitive_include_count": len(transitive),
+            })
+        else:
+            # Return full graph summary
+            file_summaries: dict[str, Any] = {}
+            for file_path, includes in graph.items():
+                file_summaries[file_path] = {
+                    "includes": includes,
+                    "include_count": len(includes),
+                }
+            result = json.dumps({
+                "files": file_summaries,
+                "total_files": len(file_summaries),
+                "total_include_edges": sum(
+                    len(inc) for inc in graph.values()
+                ),
+            })
+
+        return self._limit_length(result, max_answer_chars)

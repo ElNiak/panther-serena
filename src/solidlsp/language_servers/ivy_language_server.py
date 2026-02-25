@@ -22,6 +22,19 @@ class IvyLanguageServer(SolidLanguageServer):
     Ivy is a formal verification language used for protocol modeling and verification.
     """
 
+    _diagnostics_store: dict[str, list[dict[str, object]]] = {}
+    """Stores the latest publishDiagnostics notifications keyed by file URI."""
+
+    @classmethod
+    def get_stored_diagnostics(cls, uri: str) -> list[dict[str, object]]:
+        """Return stored diagnostics for the given URI, or empty list."""
+        return cls._diagnostics_store.get(uri, [])
+
+    @classmethod
+    def get_all_stored_diagnostics(cls) -> dict[str, list[dict[str, object]]]:
+        """Return all stored diagnostics keyed by URI."""
+        return dict(cls._diagnostics_store)
+
     def __init__(
         self,
         config: LanguageServerConfig,
@@ -137,10 +150,21 @@ class IvyLanguageServer(SolidLanguageServer):
         def do_nothing(params):
             return
 
+        def store_diagnostics(params):
+            """Capture publishDiagnostics notifications for later querying."""
+            if isinstance(params, dict):
+                uri = params.get("uri", "")
+                diags = params.get("diagnostics", [])
+                self.__class__._diagnostics_store[uri] = diags
+                self.logger.log(
+                    f"Stored {len(diags)} diagnostics for {uri}",
+                    logging.DEBUG,
+                )
+
         self.server.on_request("client/registerCapability", register_capability_handler)
         self.server.on_notification("window/logMessage", window_log_message)
         self.server.on_notification("$/progress", do_nothing)
-        self.server.on_notification("textDocument/publishDiagnostics", do_nothing)
+        self.server.on_notification("textDocument/publishDiagnostics", store_diagnostics)
 
         self.logger.log("Starting ivy_lsp server process", logging.INFO)
         self.server.start()
