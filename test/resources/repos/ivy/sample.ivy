@@ -1,0 +1,15 @@
+#lang ivy1.7
+
+include helper
+
+object protocol = {
+    type packet
+    action send(p: packet)
+    action receive(p: packet)
+
+    specification {
+        before send {
+            require p ~= 0
+        }
+    }
+}

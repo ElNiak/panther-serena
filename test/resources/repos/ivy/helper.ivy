@@ -1,0 +1,6 @@
+#lang ivy1.7
+
+object helper = {
+    type id
+    action get_id : id
+}
