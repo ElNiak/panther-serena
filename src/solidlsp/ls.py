@@ -275,6 +275,11 @@ class SolidLanguageServer(ABC):
 
             ls = ALLanguageServer(config, logger, repository_root_path, solidlsp_settings=solidlsp_settings)
 
+        elif config.code_language == Language.IVY:
+            from solidlsp.language_servers.ivy_language_server import IvyLanguageServer
+
+            ls = IvyLanguageServer(config, logger, repository_root_path, solidlsp_settings=solidlsp_settings)
+
         else:
             logger.log(f"Language {config.code_language} is not supported", logging.ERROR)
             raise SolidLSPException(f"Language {config.code_language} is not supported")

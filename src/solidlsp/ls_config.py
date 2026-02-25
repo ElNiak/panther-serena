@@ -50,6 +50,11 @@ class Language(str, Enum):
     NIX = "nix"
     ERLANG = "erlang"
     AL = "al"
+    IVY = "ivy"
+    """Ivy language server for the Ivy formal verification language.
+    Requires ivy_lsp to be installed and available on PATH.
+    Supports .ivy files used in protocol formal verification and modeling.
+    """
     # Experimental or deprecated Language Servers
     TYPESCRIPT_VTS = "typescript_vts"
     """Use the typescript language server through the natively bundled vscode extension via https://github.com/yioneko/vtsls"""
@@ -74,7 +79,7 @@ class Language(str, Enum):
         """
         Check if the language server is experimental or deprecated.
         """
-        return self in {self.TYPESCRIPT_VTS, self.PYTHON_JEDI, self.CSHARP_OMNISHARP, self.RUBY_SOLARGRAPH}
+        return self in {self.TYPESCRIPT_VTS, self.PYTHON_JEDI, self.CSHARP_OMNISHARP, self.RUBY_SOLARGRAPH, self.IVY}
 
     def __str__(self) -> str:
         return self.value
@@ -133,6 +138,8 @@ class Language(str, Enum):
                 return FilenameMatcher("*.erl", "*.hrl", "*.escript", "*.config", "*.app", "*.app.src")
             case self.AL:
                 return FilenameMatcher("*.al", "*.dal")
+            case self.IVY:
+                return FilenameMatcher("*.ivy")
             case _:
                 raise ValueError(f"Unhandled language: {self}")
 
