@@ -56,7 +56,7 @@ def _validate_ivy_path(project_root: str, relative_path: str) -> str:
 def _require_ivy_tool(tool_name: str) -> None:
     """Raise FileNotFoundError if the given Ivy CLI tool is not on PATH."""
     if shutil.which(tool_name) is None:
-        raise FileNotFoundError(f"'{tool_name}' is not installed or not on PATH.\n" f"Install the Ivy toolchain to use this tool.")
+        raise FileNotFoundError(f"'{tool_name}' is not installed or not on PATH.\nInstall the Ivy toolchain to use this tool.")
 
 
 class IvyCheckTool(Tool, ToolMarkerOptional):
@@ -111,7 +111,7 @@ class IvyCheckTool(Tool, ToolMarkerOptional):
         parse_warning = None
         if result.return_code != 0 and len(diagnostics) == 0:
             parse_warning = (
-                "ivy_check exited with non-zero status but no structured " "diagnostics could be parsed. Check raw_output for details."
+                "ivy_check exited with non-zero status but no structured diagnostics could be parsed. Check raw_output for details."
             )
 
         payload: dict[str, Any] = {
@@ -429,10 +429,10 @@ class IvyGotoDefinitionTool(Tool, ToolMarkerSymbolicRead, ToolMarkerOptional):
         :return: a JSON object with definition locations (file, line, column)
         """
         if not self.agent.is_using_language_server():
-            raise RuntimeError("Language server not available. " "IvyGotoDefinitionTool requires an active Ivy language server.")
+            raise RuntimeError("Language server not available. IvyGotoDefinitionTool requires an active Ivy language server.")
 
-        language_server = self.agent.language_server
-        assert language_server is not None
+        ls_manager = self.agent.get_language_server_manager_or_raise()
+        language_server = ls_manager.get_language_server(relative_path)
 
         locations = language_server.request_definition(relative_path, line, column)
 
@@ -459,8 +459,8 @@ class IvyGotoDefinitionTool(Tool, ToolMarkerSymbolicRead, ToolMarkerOptional):
                         start_ctx = max(0, target_line - 1)
                         end_ctx = min(len(target_lines), target_line + 4)
                         definition["context"] = "".join(target_lines[start_ctx:end_ctx]).rstrip()
-                except Exception:
-                    pass
+                except OSError as e:
+                    definition["context_error"] = str(e)
             definitions.append(definition)
 
         result = json.dumps(
