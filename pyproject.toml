@@ -34,6 +34,7 @@ dependencies = [
   "tqdm>=4.67.1",
   "tiktoken>=0.9.0",
   "anthropic>=0.54.0",
+  "ivy-lsp>=0.2.0",
 ]
 
 [[tool.uv.index]]
@@ -273,6 +274,7 @@ markers = [
   "dart: language server running for Dart",
   "erlang: language server running for Erlang",
   "al: language server running for AL (Microsoft Dynamics 365 Business Central)",
+  "ivy: language server running for Ivy (formal verification)",
 ]
 
 [tool.codespell]

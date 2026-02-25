@@ -223,18 +223,48 @@ class ProjectConfig(ToolInclusionDefinition, ToStringMixin):
     @classmethod
     def _from_dict(cls, data: dict[str, Any]) -> Self:
         """
-        Create a ProjectConfig instance from a configuration dictionary
+        Create a ProjectConfig instance from a configuration dictionary.
+
+        Supports both singular ``language: python`` (legacy) and plural
+        ``languages: [python, cpp]`` (current upstream) config formats.
+        When ``languages`` is a list, the first entry is used as the primary language.
         """
-        language_str = data["language"].lower()
         project_name = data["project_name"]
+
+        # Support both 'language' (singular) and 'languages' (plural list)
+        if "languages" in data and data["languages"]:
+            langs = data["languages"]
+            if isinstance(langs, list):
+                candidates = [str(l).lower() for l in langs]
+            else:
+                candidates = [str(langs).lower()]
+        elif "language" in data:
+            candidates = [str(data["language"]).lower()]
+        else:
+            raise KeyError(
+                f"Project '{project_name}' is missing both 'language' and 'languages' fields. "
+                f"Add one to the project config, e.g.: language: python"
+            )
+
         # backwards compatibility
-        if language_str == "javascript":
-            log.warning(f"Found deprecated project language `javascript` in project {project_name}, please change to `typescript`")
-            language_str = "typescript"
-        try:
-            language = Language(language_str)
-        except ValueError as e:
-            raise ValueError(f"Invalid language: {data['language']}.\nValid languages are: {[l.value for l in Language]}") from e
+        candidates = ["typescript" if c == "javascript" else c for c in candidates]
+
+        # Find the first supported language, skipping unsupported ones
+        valid_values = {l.value for l in Language}
+        language = None
+        for candidate in candidates:
+            if candidate in valid_values:
+                language = Language(candidate)
+                break
+            else:
+                log.warning(f"Skipping unsupported language '{candidate}' in project {project_name}")
+
+        if language is None:
+            raise ValueError(
+                f"No supported language found for project '{project_name}'. "
+                f"Candidates: {candidates}\n"
+                f"Valid languages are: {sorted(valid_values)}"
+            )
         return cls(
             project_name=project_name,
             language=language,
@@ -434,7 +464,11 @@ class SerenaConfig(ToolInclusionDefinition, ToStringMixin):
                 if path is None:
                     continue
                 num_project_migrations += 1
-            project_config = ProjectConfig.load(path)
+            try:
+                project_config = ProjectConfig.load(path)
+            except (ValueError, KeyError) as e:
+                log.warning(f"Skipping project {path}: {e}")
+                continue
             project = RegisteredProject(
                 project_root=str(path),
                 project_config=project_config,
