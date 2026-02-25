@@ -242,41 +242,41 @@ class IvyDiagnosticsTool(Tool, ToolMarkerOptional):
             default value.
         :return: a JSON object with diagnostics per file
         """
+        import pathlib
+
         from solidlsp.language_servers.ivy_language_server import (
             IvyLanguageServer,
         )
 
-        ls_manager = self.agent.get_language_server_manager_or_raise()
-        # Resolve the Ivy language server instance. When a relative_path is
-        # given we can look it up directly; otherwise fall back to the first
-        # IvyLanguageServer found in the manager.
+        # Resolve the Ivy language server instance through the agent
         ivy_ls: IvyLanguageServer | None = None
-        if relative_path is not None:
-            ls = ls_manager.get_language_server(relative_path)
-            if isinstance(ls, IvyLanguageServer):
-                ivy_ls = ls
-        if ivy_ls is None:
-            for ls in ls_manager._language_servers.values():
+        if self.agent.is_using_language_server():
+            try:
+                ls_manager = self.agent.get_language_server_manager_or_raise()
+                probe = relative_path if relative_path else "probe.ivy"
+                ls = ls_manager.get_language_server(probe)
                 if isinstance(ls, IvyLanguageServer):
                     ivy_ls = ls
-                    break
-        if ivy_ls is None:
-            return json.dumps({"error": "No Ivy language server is active."})
+            except Exception:
+                pass
+
+        server_active = ivy_ls is not None
 
         if relative_path is not None:
             project_root = self.get_project_root()
             abs_path = os.path.join(project_root, relative_path)
-            uri = "file://" + abs_path
-            diags = ivy_ls.get_stored_diagnostics(uri)
+            uri = pathlib.Path(abs_path).as_uri()
+            diags = ivy_ls.get_stored_diagnostics(uri) if ivy_ls else []
             result = json.dumps(
                 {
                     "file": relative_path,
                     "diagnostics": diags,
                     "diagnostic_count": len(diags),
+                    "server_active": server_active,
                 }
             )
         else:
-            all_diags = ivy_ls.get_all_stored_diagnostics()
+            all_diags = ivy_ls.get_all_stored_diagnostics() if ivy_ls else {}
             summary: dict[str, Any] = {}
             for uri, diags in all_diags.items():
                 filepath = uri.replace("file://", "")
@@ -288,6 +288,7 @@ class IvyDiagnosticsTool(Tool, ToolMarkerOptional):
                 {
                     "files": summary,
                     "total_files": len(summary),
+                    "server_active": server_active,
                 }
             )
 
