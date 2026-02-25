@@ -506,18 +506,28 @@ class IvyIncludeGraphTool(Tool, ToolMarkerOptional):
         graph: dict[str, list[str]] = {}  # file -> list of included module names
         file_by_basename: dict[str, str] = {}  # module name -> relative path
 
-        for dirpath, _dirnames, filenames in os.walk(project_root):
-            # Skip common non-source directories
-            rel_dir = os.path.relpath(dirpath, project_root)
-            if any(
-                part in {".git", ".venv", "venv", "node_modules", "__pycache__", "build", "dist", "submodules"}
-                for part in rel_dir.split(os.sep)
-            ):
-                continue
+        _SKIP_DIRS = {
+            ".git",
+            ".venv",
+            "venv",
+            "node_modules",
+            "__pycache__",
+            "build",
+            "dist",
+            "submodules",
+        }
+        MAX_IVY_FILES = 5000
+        skipped_files: list[dict[str, str]] = []
+
+        for dirpath, dirnames, filenames in os.walk(project_root):
+            # Prune directories in-place to prevent os.walk from descending
+            dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
 
             for fname in filenames:
                 if not fname.endswith(".ivy"):
                     continue
+                if len(graph) >= MAX_IVY_FILES:
+                    break
                 rel_path = os.path.relpath(os.path.join(dirpath, fname), project_root)
                 basename = fname[:-4]  # strip .ivy
                 file_by_basename[basename] = rel_path
@@ -526,11 +536,15 @@ class IvyIncludeGraphTool(Tool, ToolMarkerOptional):
                 try:
                     with open(abs_file, encoding="utf-8", errors="replace") as f:
                         source = f.read()
-                except OSError:
+                except OSError as e:
+                    skipped_files.append({"file": rel_path, "error": str(e)})
                     continue
 
                 includes = re.findall(r"^include\s+(\w+)", source, re.MULTILINE)
                 graph[rel_path] = includes
+
+            if len(graph) >= MAX_IVY_FILES:
+                break
 
         if relative_path is not None:
             # Return focused view for a single file
@@ -574,6 +588,7 @@ class IvyIncludeGraphTool(Tool, ToolMarkerOptional):
                     "included_by": included_by,
                     "transitive_includes": sorted(transitive),
                     "transitive_include_count": len(transitive),
+                    "skipped_files": skipped_files,
                 }
             )
         else:
@@ -589,6 +604,7 @@ class IvyIncludeGraphTool(Tool, ToolMarkerOptional):
                     "files": file_summaries,
                     "total_files": len(file_summaries),
                     "total_include_edges": sum(len(inc) for inc in graph.values()),
+                    "skipped_files": skipped_files,
                 }
             )
 
