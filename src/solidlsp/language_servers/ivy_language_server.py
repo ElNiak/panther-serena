@@ -10,10 +10,11 @@ import shutil
 
 from solidlsp.ls import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
-from solidlsp.ls_logger import LanguageServerLogger
 from solidlsp.lsp_protocol_handler.lsp_types import InitializeParams
 from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
 from solidlsp.settings import SolidLSPSettings
+
+log = logging.getLogger(__name__)
 
 
 class IvyLanguageServer(SolidLanguageServer):
@@ -38,7 +39,6 @@ class IvyLanguageServer(SolidLanguageServer):
     def __init__(
         self,
         config: LanguageServerConfig,
-        logger: LanguageServerLogger,
         repository_root_path: str,
         solidlsp_settings: SolidLSPSettings,
     ):
@@ -46,12 +46,11 @@ class IvyLanguageServer(SolidLanguageServer):
         Creates an IvyLanguageServer instance. This class is not meant to be
         instantiated directly. Use LanguageServer.create() instead.
         """
-        ivy_lsp_cmd = self._find_ivy_lsp(logger)
+        ivy_lsp_cmd = self._find_ivy_lsp()
         include_paths = os.environ.get("IVY_LSP_INCLUDE_PATHS", "")
         exclude_paths = os.environ.get("IVY_LSP_EXCLUDE_PATHS", "submodules,test")
         super().__init__(
             config,
-            logger,
             repository_root_path,
             ProcessLaunchInfo(
                 cmd=ivy_lsp_cmd,
@@ -66,7 +65,7 @@ class IvyLanguageServer(SolidLanguageServer):
         )
 
     @staticmethod
-    def _find_ivy_lsp(logger: LanguageServerLogger) -> str:
+    def _find_ivy_lsp() -> str:
         """
         Locate the ivy_lsp executable on the system PATH.
 
@@ -85,7 +84,7 @@ class IvyLanguageServer(SolidLanguageServer):
                 "Or from the panther_ivy package: pip install -e '.[lsp]'\n"
                 "After installation, make sure 'ivy_lsp' is available on your PATH."
             )
-        logger.log(f"Found ivy_lsp at: {ivy_lsp_path}", logging.INFO)
+        log.info(f"Found ivy_lsp at: {ivy_lsp_path}")
         return ivy_lsp_path
 
     @staticmethod
@@ -145,7 +144,7 @@ class IvyLanguageServer(SolidLanguageServer):
             return
 
         def window_log_message(msg):
-            self.logger.log(f"LSP: window/logMessage: {msg}", logging.INFO)
+            log.info(f"LSP: window/logMessage: {msg}")
 
         def do_nothing(params):
             return
@@ -156,29 +155,20 @@ class IvyLanguageServer(SolidLanguageServer):
                 uri = params.get("uri", "")
                 diags = params.get("diagnostics", [])
                 self.__class__._diagnostics_store[uri] = diags
-                self.logger.log(
-                    f"Stored {len(diags)} diagnostics for {uri}",
-                    logging.DEBUG,
-                )
+                log.debug(f"Stored {len(diags)} diagnostics for {uri}")
 
         self.server.on_request("client/registerCapability", register_capability_handler)
         self.server.on_notification("window/logMessage", window_log_message)
         self.server.on_notification("$/progress", do_nothing)
         self.server.on_notification("textDocument/publishDiagnostics", store_diagnostics)
 
-        self.logger.log("Starting ivy_lsp server process", logging.INFO)
+        log.info("Starting ivy_lsp server process")
         self.server.start()
         initialize_params = self._get_initialize_params(self.repository_root_path)
 
-        self.logger.log(
-            "Sending initialize request from LSP client to ivy_lsp server and awaiting response",
-            logging.INFO,
-        )
+        log.info("Sending initialize request from LSP client to ivy_lsp server and awaiting response")
         init_response = self.server.send.initialize(initialize_params)
-        self.logger.log(
-            f"Received initialize response from ivy_lsp server: {init_response}",
-            logging.DEBUG,
-        )
+        log.debug(f"Received initialize response from ivy_lsp server: {init_response}")
 
         capabilities = init_response.get("capabilities", {})
         assert "textDocumentSync" in capabilities, "ivy_lsp did not report textDocumentSync capability"
@@ -192,9 +182,9 @@ class IvyLanguageServer(SolidLanguageServer):
             "hoverProvider",
         ]:
             if cap_name in capabilities:
-                self.logger.log(f"ivy_lsp supports {cap_name}", logging.INFO)
+                log.info(f"ivy_lsp supports {cap_name}")
             else:
-                self.logger.log(f"ivy_lsp does not report {cap_name}", logging.WARNING)
+                log.warning(f"ivy_lsp does not report {cap_name}")
 
         self.server.notify.initialized({})
-        self.logger.log("Ivy language server initialization complete", logging.INFO)
+        log.info("Ivy language server initialization complete")

@@ -171,7 +171,7 @@ class TestDartLanguageServer:
     def test_find_referencing_symbols(self, language_server: SolidLanguageServer) -> None:
         """Test finding references using symbol selection range."""
         file_path = os.path.join("lib", "main.dart")
-        symbols = language_server.request_document_symbols(file_path)
+        symbols = language_server.request_document_symbols(file_path).get_all_symbols_and_roots()
 
         # Handle nested symbol structure - symbols can be nested in lists
         symbol_list = symbols[0] if symbols and isinstance(symbols[0], list) else symbols
@@ -212,7 +212,8 @@ class TestDartLanguageServer:
             assert containing_symbol["name"] == "add"
             assert containing_symbol["kind"] == SymbolKind.Method
             if "body" in containing_symbol:
-                assert "add" in containing_symbol["body"] or "final result" in containing_symbol["body"]
+                body = containing_symbol["body"].get_text()
+                assert "add" in body or "final result" in body
 
     @pytest.mark.parametrize("language_server", [Language.DART], indirect=True)
     def test_request_containing_symbol_class(self, language_server: SolidLanguageServer) -> None:
@@ -281,7 +282,7 @@ class TestDartLanguageServer:
     def test_request_document_symbols(self, language_server: SolidLanguageServer) -> None:
         """Test getting document symbols from a Dart file."""
         file_path = os.path.join("lib", "main.dart")
-        symbols = language_server.request_document_symbols(file_path)
+        symbols = language_server.request_document_symbols(file_path).get_all_symbols_and_roots()
 
         # Check that we have symbols
         assert len(symbols) > 0
@@ -308,7 +309,7 @@ class TestDartLanguageServer:
     def test_request_referencing_symbols_comprehensive(self, language_server: SolidLanguageServer) -> None:
         """Test comprehensive referencing symbols functionality."""
         file_path = os.path.join("lib", "main.dart")
-        symbols = language_server.request_document_symbols(file_path)
+        symbols = language_server.request_document_symbols(file_path).get_all_symbols_and_roots()
 
         # Handle nested symbol structure
         symbol_list = symbols[0] if symbols and isinstance(symbols[0], list) else symbols
@@ -339,7 +340,7 @@ class TestDartLanguageServer:
         helper_file_path = os.path.join("lib", "helper.dart")
 
         # Test finding references to subtract function from helper.dart in main.dart
-        helper_symbols = language_server.request_document_symbols(helper_file_path)
+        helper_symbols = language_server.request_document_symbols(helper_file_path).get_all_symbols_and_roots()
         symbol_list = helper_symbols[0] if helper_symbols and isinstance(helper_symbols[0], list) else helper_symbols
 
         subtract_symbol = next((s for s in symbol_list if s.get("name") == "subtract"), None)

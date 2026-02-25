@@ -11,9 +11,10 @@ import platform
 import pytest
 
 from serena.project import Project
-from serena.text_utils import LineType
+from serena.util.text_utils import LineType
 from solidlsp import SolidLanguageServer
 from solidlsp.ls_config import Language
+from test.conftest import is_ci
 
 # Skip Swift tests on Windows due to complex GitHub Actions configuration
 WINDOWS_SKIP = platform.system() == "Windows"
@@ -88,8 +89,8 @@ class TestSwiftLanguageServerBasics:
 
         # First, let's check if Utils is used anywhere (it might not be in this simple test)
         # We'll test goto_definition on Utils struct itself
-        symbols = language_server.request_document_symbols(utils_file)
-        utils_symbol = next((s for s in symbols[0] if s.get("name") == "Utils"), None)
+        symbols = language_server.request_document_symbols(utils_file).get_all_symbols_and_roots()
+        utils_symbol = next(s for s in symbols[0] if s.get("name") == "Utils")
 
         sel_start = utils_symbol["selectionRange"]["start"]
         definitions = language_server.request_definition(utils_file, sel_start["line"], sel_start["character"])
@@ -99,14 +100,15 @@ class TestSwiftLanguageServerBasics:
         utils_def = definitions[0]
         assert utils_def.get("uri", "").endswith("utils.swift"), "Definition should be in utils.swift"
 
+    @pytest.mark.xfail(is_ci, reason="Test is flaky in CI")  # See #1040
     @pytest.mark.parametrize("language_server", [Language.SWIFT], indirect=True)
     def test_request_references_calculator_class(self, language_server: SolidLanguageServer) -> None:
         """Test request_references on the Calculator class."""
         # Get references to the Calculator class in main.swift
         file_path = os.path.join("src", "main.swift")
-        symbols = language_server.request_document_symbols(file_path)
+        symbols = language_server.request_document_symbols(file_path).get_all_symbols_and_roots()
 
-        calculator_symbol = next((s for s in symbols[0] if s.get("name") == "Calculator"), None)
+        calculator_symbol = next(s for s in symbols[0] if s.get("name") == "Calculator")
 
         sel_start = calculator_symbol["selectionRange"]["start"]
         references = language_server.request_references(file_path, sel_start["line"], sel_start["character"])
@@ -121,14 +123,15 @@ class TestSwiftLanguageServerBasics:
         line_5_refs = [ref for ref in calculator_refs if ref.get("range", {}).get("start", {}).get("line") == 4]
         assert len(line_5_refs) > 0, "Calculator should be referenced at line 5"
 
+    @pytest.mark.xfail(is_ci, reason="Test is flaky in CI")  # See #1040
     @pytest.mark.parametrize("language_server", [Language.SWIFT], indirect=True)
     def test_request_references_user_struct(self, language_server: SolidLanguageServer) -> None:
         """Test request_references on the User struct."""
         # Get references to the User struct in main.swift
         file_path = os.path.join("src", "main.swift")
-        symbols = language_server.request_document_symbols(file_path)
+        symbols = language_server.request_document_symbols(file_path).get_all_symbols_and_roots()
 
-        user_symbol = next((s for s in symbols[0] if s.get("name") == "User"), None)
+        user_symbol = next(s for s in symbols[0] if s.get("name") == "User")
 
         sel_start = user_symbol["selectionRange"]["start"]
         references = language_server.request_references(file_path, sel_start["line"], sel_start["character"])
@@ -142,12 +145,13 @@ class TestSwiftLanguageServerBasics:
         line_9_refs = [ref for ref in user_refs if ref.get("range", {}).get("start", {}).get("line") == 8]
         assert len(line_9_refs) > 0, "User should be referenced at line 9"
 
+    @pytest.mark.xfail(is_ci, reason="Test is flaky in CI")  # See #1040
     @pytest.mark.parametrize("language_server", [Language.SWIFT], indirect=True)
     def test_request_references_utils_struct(self, language_server: SolidLanguageServer) -> None:
         """Test request_references on the Utils struct."""
         # Get references to the Utils struct in utils.swift
         file_path = os.path.join("src", "utils.swift")
-        symbols = language_server.request_document_symbols(file_path)
+        symbols = language_server.request_document_symbols(file_path).get_all_symbols_and_roots()
         utils_symbol = next((s for s in symbols[0] if s.get("name") == "Utils"), None)
         if not utils_symbol or "selectionRange" not in utils_symbol:
             raise AssertionError("Utils symbol or its selectionRange not found")

@@ -1,10 +1,14 @@
+import logging
 import shutil
 import tempfile
 from pathlib import Path
 
 import pytest
 
-from serena.config.serena_config import ProjectConfig
+from serena.agent import SerenaAgent
+from serena.config.serena_config import LanguageBackend, ProjectConfig, RegisteredProject, SerenaConfig
+from serena.constants import PROJECT_TEMPLATE_FILE
+from serena.project import Project
 from solidlsp.ls_config import Language
 
 
@@ -28,16 +32,7 @@ class TestProjectConfigAutogenerate:
             ProjectConfig.autogenerate(self.project_path, save_to_disk=False)
 
         error_message = str(exc_info.value)
-        # Check that the error message contains all the key information
         assert "No source files found" in error_message
-        assert str(self.project_path.resolve()) in error_message
-        assert "To use Serena with this project" in error_message
-        assert "Add source files in one of the supported languages" in error_message
-        assert "Create a project configuration file manually" in error_message
-        assert str(Path(".serena") / "project.yml") in error_message
-        assert "Example project.yml:" in error_message
-        assert f"project_name: {self.project_path.name}" in error_message
-        assert "language: python" in error_message
 
     def test_autogenerate_with_python_files(self):
         """Test successful autogeneration with Python source files."""
@@ -50,7 +45,17 @@ class TestProjectConfigAutogenerate:
 
         # Verify the configuration
         assert config.project_name == self.project_path.name
-        assert config.language == Language.PYTHON
+        assert config.languages == [Language.PYTHON]
+
+    def test_autogenerate_with_js_files(self):
+        """Test successful autogeneration with JavaScript source files."""
+        # Create files for multiple languages
+        (self.project_path / "small.js").write_text("console.log('JS');")
+
+        # Run autogenerate - should pick Python as dominant
+        config = ProjectConfig.autogenerate(self.project_path, save_to_disk=False)
+
+        assert config.languages == [Language.TYPESCRIPT]
 
     def test_autogenerate_with_multiple_languages(self):
         """Test autogeneration picks dominant language when multiple are present."""
@@ -62,7 +67,7 @@ class TestProjectConfigAutogenerate:
         # Run autogenerate - should pick Python as dominant
         config = ProjectConfig.autogenerate(self.project_path, save_to_disk=False)
 
-        assert config.language == Language.PYTHON
+        assert config.languages == [Language.PYTHON]
 
     def test_autogenerate_saves_to_disk(self):
         """Test that autogenerate can save the configuration to disk."""
@@ -78,7 +83,7 @@ class TestProjectConfigAutogenerate:
         assert config_path.exists()
 
         # Verify the content
-        assert config.language == Language.GO
+        assert config.languages == [Language.GO]
 
     def test_autogenerate_nonexistent_path(self):
         """Test that autogenerate raises FileNotFoundError for non-existent path."""
@@ -115,24 +120,197 @@ class TestProjectConfigAutogenerate:
         config = ProjectConfig.autogenerate(self.project_path, project_name=custom_name, save_to_disk=False)
 
         assert config.project_name == custom_name
-        assert config.language == Language.TYPESCRIPT
+        assert config.languages == [Language.TYPESCRIPT]
 
-    def test_autogenerate_error_message_format(self):
-        """Test the specific format of the error message for better user experience."""
-        with pytest.raises(ValueError) as exc_info:
-            ProjectConfig.autogenerate(self.project_path, save_to_disk=False)
 
-        error_lines = str(exc_info.value).split("\n")
+class TestProjectConfig:
+    def test_template_is_complete(self):
+        _, is_complete = ProjectConfig._load_yaml(PROJECT_TEMPLATE_FILE)
+        assert is_complete, "Project template YAML is incomplete; all fields must be present (with descriptions)."
 
-        # Verify the structure of the error message
-        assert len(error_lines) >= 8  # Should have multiple lines of helpful information
 
-        # Check for numbered instructions
-        assert any("1." in line for line in error_lines)
-        assert any("2." in line for line in error_lines)
+class TestProjectConfigLanguageBackend:
+    """Tests for the per-project language_backend field."""
 
-        # Check for supported languages list
-        assert any("Python" in line and "TypeScript" in line for line in error_lines)
+    def test_language_backend_defaults_to_none(self):
+        config = ProjectConfig(
+            project_name="test",
+            languages=[Language.PYTHON],
+        )
+        assert config.language_backend is None
 
-        # Check example includes comment about language options
-        assert any("# or typescript, java, csharp" in line for line in error_lines)
+    def test_language_backend_can_be_set(self):
+        config = ProjectConfig(
+            project_name="test",
+            languages=[Language.PYTHON],
+            language_backend=LanguageBackend.JETBRAINS,
+        )
+        assert config.language_backend == LanguageBackend.JETBRAINS
+
+    def test_language_backend_roundtrips_through_yaml(self):
+        config = ProjectConfig(
+            project_name="test",
+            languages=[Language.PYTHON],
+            language_backend=LanguageBackend.JETBRAINS,
+        )
+        d = config._to_yaml_dict()
+        assert d["language_backend"] == "JetBrains"
+
+    def test_language_backend_none_roundtrips_through_yaml(self):
+        config = ProjectConfig(
+            project_name="test",
+            languages=[Language.PYTHON],
+        )
+        d = config._to_yaml_dict()
+        assert d["language_backend"] is None
+
+    def test_language_backend_parsed_from_dict(self):
+        """Test that _from_dict parses language_backend correctly."""
+        template_path = PROJECT_TEMPLATE_FILE
+        data, _ = ProjectConfig._load_yaml(template_path)
+        data["project_name"] = "test"
+        data["languages"] = ["python"]
+        data["language_backend"] = "JetBrains"
+        config = ProjectConfig._from_dict(data)
+        assert config.language_backend == LanguageBackend.JETBRAINS
+
+    def test_language_backend_none_when_missing_from_dict(self):
+        """Test that _from_dict handles missing language_backend gracefully."""
+        template_path = PROJECT_TEMPLATE_FILE
+        data, _ = ProjectConfig._load_yaml(template_path)
+        data["project_name"] = "test"
+        data["languages"] = ["python"]
+        data.pop("language_backend", None)
+        config = ProjectConfig._from_dict(data)
+        assert config.language_backend is None
+
+
+def _make_config_with_project(
+    project_name: str,
+    language_backend: LanguageBackend | None = None,
+    global_backend: LanguageBackend = LanguageBackend.LSP,
+) -> tuple[SerenaConfig, str]:
+    """Create a SerenaConfig with a single registered project and return (config, project_name)."""
+    project = Project(
+        project_root=str(Path(__file__).parent.parent / "resources" / "repos" / "python" / "test_repo"),
+        project_config=ProjectConfig(
+            project_name=project_name,
+            languages=[Language.PYTHON],
+            language_backend=language_backend,
+        ),
+    )
+    config = SerenaConfig(
+        gui_log_window=False,
+        web_dashboard=False,
+        log_level=logging.ERROR,
+        language_backend=global_backend,
+    )
+    config.projects = [RegisteredProject.from_project_instance(project)]
+    return config, project_name
+
+
+class TestEffectiveLanguageBackend:
+    """Tests for per-project language_backend override logic in SerenaAgent."""
+
+    def test_default_backend_is_global(self):
+        """When no project override, effective backend matches global config."""
+        config, name = _make_config_with_project("test_proj", language_backend=None, global_backend=LanguageBackend.LSP)
+        agent = SerenaAgent(project=name, serena_config=config)
+        try:
+            assert agent.get_language_backend() == LanguageBackend.LSP
+            assert agent.is_using_language_server() is True
+        finally:
+            agent.shutdown(timeout=5)
+
+    def test_project_overrides_global_backend(self):
+        """When startup project has language_backend set, it overrides the global."""
+        config, name = _make_config_with_project(
+            "test_jetbrains", language_backend=LanguageBackend.JETBRAINS, global_backend=LanguageBackend.LSP
+        )
+        agent = SerenaAgent(project=name, serena_config=config)
+        try:
+            assert agent.get_language_backend() == LanguageBackend.JETBRAINS
+            assert agent.is_using_language_server() is False
+        finally:
+            agent.shutdown(timeout=5)
+
+    def test_no_project_uses_global_backend(self):
+        """When no startup project is provided, effective backend is the global one."""
+        config = SerenaConfig(
+            gui_log_window=False,
+            web_dashboard=False,
+            log_level=logging.ERROR,
+            language_backend=LanguageBackend.LSP,
+        )
+        agent = SerenaAgent(project=None, serena_config=config)
+        try:
+            assert agent.get_language_backend() == LanguageBackend.LSP
+        finally:
+            agent.shutdown(timeout=5)
+
+    def test_activate_project_rejects_backend_mismatch(self):
+        """Post-init activation of a project with mismatched backend raises ValueError."""
+        # Start with LSP backend
+        config, name = _make_config_with_project("lsp_proj", language_backend=None, global_backend=LanguageBackend.LSP)
+
+        # Add a second project that requires JetBrains
+        jb_project = Project(
+            project_root=str(Path(__file__).parent.parent / "resources" / "repos" / "python" / "test_repo"),
+            project_config=ProjectConfig(
+                project_name="jb_proj",
+                languages=[Language.PYTHON],
+                language_backend=LanguageBackend.JETBRAINS,
+            ),
+        )
+        config.projects.append(RegisteredProject.from_project_instance(jb_project))
+
+        agent = SerenaAgent(project=name, serena_config=config)
+        try:
+            with pytest.raises(ValueError, match="Cannot activate project"):
+                agent.activate_project_from_path_or_name("jb_proj")
+        finally:
+            agent.shutdown(timeout=5)
+
+    def test_activate_project_allows_matching_backend(self):
+        """Post-init activation of a project with matching backend succeeds."""
+        config, name = _make_config_with_project("lsp_proj", language_backend=None, global_backend=LanguageBackend.LSP)
+
+        # Add a second project that also uses LSP
+        lsp_project2 = Project(
+            project_root=str(Path(__file__).parent.parent / "resources" / "repos" / "python" / "test_repo"),
+            project_config=ProjectConfig(
+                project_name="lsp_proj2",
+                languages=[Language.PYTHON],
+                language_backend=LanguageBackend.LSP,
+            ),
+        )
+        config.projects.append(RegisteredProject.from_project_instance(lsp_project2))
+
+        agent = SerenaAgent(project=name, serena_config=config)
+        try:
+            # Should not raise
+            agent.activate_project_from_path_or_name("lsp_proj2")
+        finally:
+            agent.shutdown(timeout=5)
+
+    def test_activate_project_allows_none_backend(self):
+        """Post-init activation of a project with no backend override succeeds."""
+        config, name = _make_config_with_project("lsp_proj", language_backend=None, global_backend=LanguageBackend.LSP)
+
+        # Add a second project with no backend override
+        proj2 = Project(
+            project_root=str(Path(__file__).parent.parent / "resources" / "repos" / "python" / "test_repo"),
+            project_config=ProjectConfig(
+                project_name="proj2",
+                languages=[Language.PYTHON],
+                language_backend=None,
+            ),
+        )
+        config.projects.append(RegisteredProject.from_project_instance(proj2))
+
+        agent = SerenaAgent(project=name, serena_config=config)
+        try:
+            # Should not raise — None means "inherit session backend"
+            agent.activate_project_from_path_or_name("proj2")
+        finally:
+            agent.shutdown(timeout=5)

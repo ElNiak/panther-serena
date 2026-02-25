@@ -5,8 +5,13 @@ import pytest
 from solidlsp import SolidLanguageServer
 from solidlsp.ls_config import Language
 from solidlsp.ls_utils import SymbolUtils
+from test.conftest import is_ci
 
 
+# Kotlin LSP (IntelliJ-based, pre-alpha v261) crashes on JVM restart under CI resource constraints
+# (2 CPUs, 7GB RAM). First start succeeds but subsequent starts fail with cancelled (-32800).
+# Tests pass reliably on developer machines. See PR #1061 for investigation details.
+@pytest.mark.skipif(is_ci, reason="Kotlin LSP JVM restart is unstable on CI runners")
 @pytest.mark.kotlin
 class TestKotlinLanguageServer:
     @pytest.mark.parametrize("language_server", [Language.KOTLIN], indirect=True)
@@ -25,7 +30,7 @@ class TestKotlinLanguageServer:
 
         # Dynamically determine the correct line/column for the 'Model' class name
         file_path = os.path.join("src", "main", "kotlin", "test_repo", "Model.kt")
-        symbols = language_server.request_document_symbols(file_path)
+        symbols = language_server.request_document_symbols(file_path).get_all_symbols_and_roots()
         model_symbol = None
         for sym in symbols[0]:
             print(sym)
