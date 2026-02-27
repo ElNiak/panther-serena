@@ -1,11 +1,13 @@
 """Unit tests for Ivy tool helper functions (no Ivy toolchain required)."""
 
 import os
+from unittest.mock import MagicMock
 
 import pytest
 
 from serena.tools.ivy_tools import (
     _check_structural_issues,
+    _get_ivy_language_server,
     _parse_ivy_check_output,
     _require_ivy_tool,
     _validate_ivy_path,
@@ -118,3 +120,84 @@ class TestRequireIvyTool:
     def test_rejects_missing_tool(self) -> None:
         with pytest.raises(FileNotFoundError, match="not installed"):
             _require_ivy_tool("ivy_nonexistent_tool_abc123")
+
+
+@pytest.mark.ivy
+class TestGetIvyLanguageServer:
+    """Tests for the _get_ivy_language_server helper."""
+
+    def test_returns_none_when_ls_not_active(self) -> None:
+        agent = MagicMock()
+        agent.is_using_language_server.return_value = False
+        assert _get_ivy_language_server(agent) is None
+
+    def test_returns_none_when_ls_manager_raises(self) -> None:
+        agent = MagicMock()
+        agent.is_using_language_server.return_value = True
+        agent.get_language_server_manager_or_raise.side_effect = RuntimeError("no manager")
+        assert _get_ivy_language_server(agent) is None
+
+    def test_returns_none_when_ls_is_wrong_type(self) -> None:
+        agent = MagicMock()
+        agent.is_using_language_server.return_value = True
+        ls_manager = MagicMock()
+        ls_manager.get_language_server.return_value = MagicMock()  # not IvyLanguageServer
+        agent.get_language_server_manager_or_raise.return_value = ls_manager
+        assert _get_ivy_language_server(agent) is None
+
+    def test_returns_ivy_ls_when_available(self) -> None:
+        from solidlsp.language_servers.ivy_language_server import IvyLanguageServer
+
+        agent = MagicMock()
+        agent.is_using_language_server.return_value = True
+        mock_ls = MagicMock(spec=IvyLanguageServer)
+        ls_manager = MagicMock()
+        ls_manager.get_language_server.return_value = mock_ls
+        agent.get_language_server_manager_or_raise.return_value = ls_manager
+        assert _get_ivy_language_server(agent) is mock_ls
+
+
+@pytest.mark.ivy
+class TestIvyCheckToolLspPath:
+    """Test IvyCheckTool's LSP code path raises when the server fails."""
+
+    def test_apply_via_lsp_raises_on_server_error(self) -> None:
+        """_apply_via_lsp propagates exceptions from send_custom_request."""
+        from serena.tools.ivy_tools import IvyCheckTool
+
+        tool = MagicMock(spec=IvyCheckTool)
+        tool.get_project_root.return_value = REPO_DIR
+
+        mock_ls = MagicMock()
+        mock_ls.send_custom_request.side_effect = RuntimeError("LSP down")
+
+        with pytest.raises(RuntimeError, match="LSP down"):
+            IvyCheckTool._apply_via_lsp(tool, "sample.ivy", None, mock_ls)
+
+
+@pytest.mark.ivy
+class TestIncludeGraphLspResponseMapping:
+    """Test the LSP response -> tool output format mapping."""
+
+    def test_lsp_response_to_file_summaries(self) -> None:
+        from serena.tools.ivy_tools import IvyIncludeGraphTool
+
+        tool = MagicMock(spec=IvyIncludeGraphTool)
+
+        mock_ls = MagicMock()
+        mock_ls.send_custom_request.return_value = {
+            "nodes": [
+                {"uri": "file:///a.ivy", "symbolCount": 5},
+                {"uri": "file:///b.ivy", "symbolCount": 3},
+            ],
+            "edges": [
+                {"from": "file:///a.ivy", "to": "file:///b.ivy"},
+            ],
+        }
+
+        result = IvyIncludeGraphTool._apply_via_lsp(tool, mock_ls)
+        assert result["via"] == "lsp"
+        assert result["total_files"] == 2
+        assert result["total_include_edges"] == 1
+        assert "/a.ivy" in result["files"]
+        assert result["files"]["/a.ivy"]["include_count"] == 1

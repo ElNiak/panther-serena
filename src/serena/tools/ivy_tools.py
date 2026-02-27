@@ -10,16 +10,34 @@ import json
 import logging
 import os
 import os.path
+import pathlib
 import re
 import shlex
 import shutil
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from serena.tools import Tool, ToolMarkerOptional, ToolMarkerSymbolicRead
 from serena.util.shell import execute_shell_command
 
+if TYPE_CHECKING:
+    from solidlsp.language_servers.ivy_language_server import IvyLanguageServer
+
 log = logging.getLogger(__name__)
+
+
+def _get_ivy_language_server(agent: Any) -> "IvyLanguageServer | None":  # noqa: UP007
+    """Resolve the IvyLanguageServer instance from the agent, or None."""
+    from solidlsp.language_servers.ivy_language_server import IvyLanguageServer
+
+    if not agent.is_using_language_server():
+        return None
+    try:
+        ls_manager = agent.get_language_server_manager_or_raise()
+        ls = ls_manager.get_language_server("probe.ivy")
+        return ls if isinstance(ls, IvyLanguageServer) else None
+    except Exception:
+        return None
 
 
 def _parse_ivy_check_output(output: str) -> list[dict[str, Any]]:
@@ -64,34 +82,51 @@ class IvyCheckTool(Tool, ToolMarkerOptional):
     Runs ivy_check on an Ivy source file to verify its formal properties.
     Returns structured diagnostics with file, line, severity, and message
     for each issue found.
+
+    When the Ivy language server is running, delegates to the ``ivy/verify``
+    custom command which provides staging-directory resolution, automatic
+    isolate detection, and test-scope redirection.  Falls back to the CLI
+    when no LS is available.
     """
 
-    def apply(
+    def _apply_via_lsp(
         self,
         relative_path: str,
-        isolate: str | None = None,
-        max_answer_chars: int = -1,
-    ) -> str:
-        """
-        Runs ivy_check on the specified Ivy file to perform formal verification.
-        This checks isolate assumptions, invariants, and safety properties.
-
-        Returns structured JSON with a diagnostics array containing file, line,
-        severity (error/warning), and message for each issue found.
-
-        IMPORTANT: The file must be an .ivy file within the active project.
-
-        :param relative_path: relative path to the .ivy file to check
-        :param isolate: optional isolate name to check in isolation
-            (e.g. "protocol_model" to check only that isolate)
-        :param max_answer_chars: if the output is longer than this number of
-            characters, no content will be returned. -1 means using the
-            default value.
-        :return: a JSON object with success, diagnostics array, raw_output,
-            and duration_seconds
-        """
+        isolate: str | None,
+        ivy_ls: "IvyLanguageServer",
+    ) -> dict[str, Any]:
+        """Send ivy/verify via the language server and normalise the response."""
         project_root = self.get_project_root()
-        _validate_ivy_path(project_root, relative_path)
+        uri = pathlib.Path(os.path.join(project_root, relative_path)).as_uri()
+        params: dict[str, Any] = {"textDocument": {"uri": uri}}
+        if isolate is not None:
+            params["isolate"] = isolate
+
+        resp = ivy_ls.send_custom_request("ivy/verify", params)
+
+        output_lines: list[str] = resp.get("output", [])
+        raw_output = "\n".join(output_lines)
+        diagnostics = _parse_ivy_check_output(raw_output)
+
+        return {
+            "success": resp.get("success", False),
+            "diagnostics": diagnostics,
+            "diagnostic_count": resp.get("diagnosticCount", len(diagnostics)),
+            "error_count": sum(1 for d in diagnostics if d["severity"] == "error"),
+            "warning_count": sum(1 for d in diagnostics if d["severity"] == "warning"),
+            "raw_output": raw_output.strip(),
+            "duration_seconds": round(resp.get("duration", 0.0), 2),
+            "isolate": resp.get("isolate"),
+            "via": "lsp",
+        }
+
+    def _apply_via_cli(
+        self,
+        relative_path: str,
+        isolate: str | None,
+    ) -> dict[str, Any]:
+        """Fall back to shelling out to ivy_check."""
+        project_root = self.get_project_root()
         _require_ivy_tool("ivy_check")
 
         safe_path = shlex.quote(relative_path)
@@ -107,13 +142,6 @@ class IvyCheckTool(Tool, ToolMarkerOptional):
         raw_output = result.stdout + "\n" + (result.stderr or "")
         diagnostics = _parse_ivy_check_output(raw_output)
 
-        # Warn if ivy_check failed but parser extracted nothing
-        parse_warning = None
-        if result.return_code != 0 and len(diagnostics) == 0:
-            parse_warning = (
-                "ivy_check exited with non-zero status but no structured diagnostics could be parsed. Check raw_output for details."
-            )
-
         payload: dict[str, Any] = {
             "success": result.return_code == 0,
             "diagnostics": diagnostics,
@@ -123,16 +151,62 @@ class IvyCheckTool(Tool, ToolMarkerOptional):
             "raw_output": raw_output.strip(),
             "return_code": result.return_code,
             "duration_seconds": round(duration, 2),
+            "via": "cli",
         }
-        if parse_warning:
-            payload["parse_warning"] = parse_warning
 
+        if result.return_code != 0 and len(diagnostics) == 0:
+            payload["parse_warning"] = (
+                "ivy_check exited with non-zero status but no structured diagnostics could be parsed. Check raw_output for details."
+            )
+        return payload
+
+    def apply(
+        self,
+        relative_path: str,
+        isolate: str | None = None,
+        max_answer_chars: int = -1,
+    ) -> str:
+        """
+        Runs ivy_check on the specified Ivy file to perform formal verification.
+        This checks isolate assumptions, invariants, and safety properties.
+
+        When the Ivy language server is running, uses the ``ivy/verify`` custom
+        command (benefits: staging-dir resolution, auto-isolate detection,
+        test-scope redirection).  Falls back to the CLI when no LS is active.
+
+        IMPORTANT: The file must be an .ivy file within the active project.
+
+        :param relative_path: relative path to the .ivy file to check
+        :param isolate: optional isolate name to check in isolation
+            (e.g. "protocol_model" to check only that isolate)
+        :param max_answer_chars: if the output is longer than this number of
+            characters, no content will be returned. -1 means using the
+            default value.
+        :return: a JSON object with success, diagnostics array, raw_output,
+            and duration_seconds
+        """
+        project_root = self.get_project_root()
+        _validate_ivy_path(project_root, relative_path)
+
+        ivy_ls = _get_ivy_language_server(self.agent)
+        if ivy_ls is not None:
+            try:
+                payload = self._apply_via_lsp(relative_path, isolate, ivy_ls)
+                return self._limit_length(json.dumps(payload), max_answer_chars)
+            except Exception:
+                log.debug("ivy/verify via LSP failed, falling back to CLI", exc_info=True)
+
+        payload = self._apply_via_cli(relative_path, isolate)
         return self._limit_length(json.dumps(payload), max_answer_chars)
 
 
 class IvyCompileTool(Tool, ToolMarkerOptional):
     """
     Compiles an Ivy source file to a test executable using ivyc.
+
+    When the Ivy language server is running, delegates to ``ivy/compile``
+    which handles staging-directory resolution and test-scope redirection.
+    Falls back to the CLI when no LS is available.
     """
 
     def apply(
@@ -163,8 +237,19 @@ class IvyCompileTool(Tool, ToolMarkerOptional):
         """
         project_root = self.get_project_root()
         _validate_ivy_path(project_root, relative_path)
-        _require_ivy_tool("ivyc")
 
+        ivy_ls = _get_ivy_language_server(self.agent)
+        if ivy_ls is not None:
+            try:
+                uri = pathlib.Path(os.path.join(project_root, relative_path)).as_uri()
+                params: dict[str, Any] = {"textDocument": {"uri": uri}, "target": target}
+                resp = ivy_ls.send_custom_request("ivy/compile", params)
+                resp["via"] = "lsp"
+                return self._limit_length(json.dumps(resp), max_answer_chars)
+            except Exception:
+                log.debug("ivy/compile via LSP failed, falling back to CLI", exc_info=True)
+
+        _require_ivy_tool("ivyc")
         safe_path = shlex.quote(relative_path)
         if isolate is not None:
             command = f"ivyc target={shlex.quote(target)} isolate={shlex.quote(isolate)} {safe_path}"
@@ -178,6 +263,10 @@ class IvyCompileTool(Tool, ToolMarkerOptional):
 class IvyModelInfoTool(Tool, ToolMarkerOptional):
     """
     Displays the structure of an Ivy model using ivy_show.
+
+    When the Ivy language server is running, delegates to ``ivy/showModel``
+    which provides smart isolate detection (cursor-based and multi-isolate
+    disambiguation) and test-scope redirection.
     """
 
     def apply(
@@ -189,8 +278,6 @@ class IvyModelInfoTool(Tool, ToolMarkerOptional):
         """
         Runs ivy_show on the specified Ivy file to display its model structure,
         including types, relations, actions, invariants, and isolates.
-        This is useful for understanding the high-level architecture of an
-        Ivy formal model.
 
         IMPORTANT: The file must be an .ivy file within the active project.
 
@@ -205,8 +292,21 @@ class IvyModelInfoTool(Tool, ToolMarkerOptional):
         """
         project_root = self.get_project_root()
         _validate_ivy_path(project_root, relative_path)
-        _require_ivy_tool("ivy_show")
 
+        ivy_ls = _get_ivy_language_server(self.agent)
+        if ivy_ls is not None:
+            try:
+                uri = pathlib.Path(os.path.join(project_root, relative_path)).as_uri()
+                params: dict[str, Any] = {"textDocument": {"uri": uri}}
+                if isolate is not None:
+                    params["isolate"] = isolate
+                resp = ivy_ls.send_custom_request("ivy/showModel", params)
+                resp["via"] = "lsp"
+                return self._limit_length(json.dumps(resp), max_answer_chars)
+            except Exception:
+                log.debug("ivy/showModel via LSP failed, falling back to CLI", exc_info=True)
+
+        _require_ivy_tool("ivy_show")
         safe_path = shlex.quote(relative_path)
         if isolate is not None:
             command = f"ivy_show isolate={shlex.quote(isolate)} {safe_path}"
@@ -222,6 +322,9 @@ class IvyDiagnosticsTool(Tool, ToolMarkerOptional):
     Returns cached LSP diagnostics for an Ivy file without running ivy_check.
     Diagnostics are captured from the Ivy language server's publishDiagnostics
     notifications (structural issues, parse errors, requirement analysis).
+
+    Also includes ``featureStatus`` from the server when available, showing
+    per-feature availability (code lens, diagnostics, navigation, etc.).
     """
 
     def apply(
@@ -240,41 +343,33 @@ class IvyDiagnosticsTool(Tool, ToolMarkerOptional):
         :param max_answer_chars: if the output is longer than this number of
             characters, no content will be returned. -1 means using the
             default value.
-        :return: a JSON object with diagnostics per file
+        :return: a JSON object with diagnostics per file and optional featureStatus
         """
-        import pathlib
-
-        from solidlsp.language_servers.ivy_language_server import (
-            IvyLanguageServer,
-        )
-
-        # Resolve the Ivy language server instance through the agent
-        ivy_ls: IvyLanguageServer | None = None
-        if self.agent.is_using_language_server():
-            try:
-                ls_manager = self.agent.get_language_server_manager_or_raise()
-                probe = relative_path if relative_path else "probe.ivy"
-                ls = ls_manager.get_language_server(probe)
-                if isinstance(ls, IvyLanguageServer):
-                    ivy_ls = ls
-            except Exception:
-                pass
-
+        ivy_ls = _get_ivy_language_server(self.agent)
         server_active = ivy_ls is not None
+
+        # Fetch feature status from server when available
+        feature_status: dict[str, Any] | None = None
+        if ivy_ls is not None:
+            try:
+                feature_status = ivy_ls.send_custom_request("ivy/featureStatus")
+            except Exception:
+                log.debug("ivy/featureStatus request failed", exc_info=True)
 
         if relative_path is not None:
             project_root = self.get_project_root()
             abs_path = os.path.join(project_root, relative_path)
             uri = pathlib.Path(abs_path).as_uri()
             diags = ivy_ls.get_stored_diagnostics(uri) if ivy_ls else []
-            result = json.dumps(
-                {
-                    "file": relative_path,
-                    "diagnostics": diags,
-                    "diagnostic_count": len(diags),
-                    "server_active": server_active,
-                }
-            )
+            payload: dict[str, Any] = {
+                "file": relative_path,
+                "diagnostics": diags,
+                "diagnostic_count": len(diags),
+                "server_active": server_active,
+            }
+            if feature_status is not None:
+                payload["featureStatus"] = feature_status
+            result = json.dumps(payload)
         else:
             all_diags = ivy_ls.get_all_stored_diagnostics() if ivy_ls else {}
             summary: dict[str, Any] = {}
@@ -284,13 +379,14 @@ class IvyDiagnosticsTool(Tool, ToolMarkerOptional):
                     "diagnostics": diags,
                     "diagnostic_count": len(diags),
                 }
-            result = json.dumps(
-                {
-                    "files": summary,
-                    "total_files": len(summary),
-                    "server_active": server_active,
-                }
-            )
+            payload = {
+                "files": summary,
+                "total_files": len(summary),
+                "server_active": server_active,
+            }
+            if feature_status is not None:
+                payload["featureStatus"] = feature_status
+            result = json.dumps(payload)
 
         return self._limit_length(result, max_answer_chars)
 
@@ -494,9 +590,120 @@ class IvyGotoDefinitionTool(Tool, ToolMarkerSymbolicRead, ToolMarkerOptional):
 class IvyIncludeGraphTool(Tool, ToolMarkerOptional):
     """
     Exposes the include dependency graph for Ivy files.
-    Scans .ivy files for 'include' directives and returns which files
-    include which, enabling agents to understand cross-file dependencies.
+
+    When the Ivy language server is running, uses ``ivy/includeGraph`` which
+    returns accurate indexed data (node URIs with symbol counts and edges).
+    Falls back to filesystem scanning when no LS is available.
     """
+
+    def _apply_via_lsp(self, ivy_ls: "IvyLanguageServer") -> dict[str, Any]:
+        """Fetch the include graph from the language server and normalise."""
+        resp = ivy_ls.send_custom_request("ivy/includeGraph")
+        nodes: list[dict[str, Any]] = resp.get("nodes", [])
+        edges: list[dict[str, Any]] = resp.get("edges", [])
+
+        # Convert LSP response to the same format as the filesystem walk
+        file_summaries: dict[str, Any] = {}
+        for node in nodes:
+            uri = node.get("uri", "")
+            filepath = uri.replace("file://", "")
+            includes = [
+                e["to"].replace("file://", "")
+                for e in edges
+                if e.get("from") == uri
+            ]
+            file_summaries[filepath] = {
+                "includes": includes,
+                "include_count": len(includes),
+                "symbol_count": node.get("symbolCount", 0),
+            }
+
+        return {
+            "files": file_summaries,
+            "total_files": len(file_summaries),
+            "total_include_edges": len(edges),
+            "via": "lsp",
+        }
+
+    def _apply_via_filesystem(self, project_root: str, relative_path: str | None) -> dict[str, Any]:
+        """Fall back to scanning .ivy files for include directives."""
+        graph: dict[str, list[str]] = {}
+        file_by_basename: dict[str, str] = {}
+
+        _SKIP_DIRS = {
+            ".git", ".venv", "venv", "node_modules",
+            "__pycache__", "build", "dist", "submodules",
+        }
+        MAX_IVY_FILES = 5000
+        skipped_files: list[dict[str, str]] = []
+
+        for dirpath, dirnames, filenames in os.walk(project_root):
+            dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+            for fname in filenames:
+                if not fname.endswith(".ivy"):
+                    continue
+                if len(graph) >= MAX_IVY_FILES:
+                    break
+                rel_path = os.path.relpath(os.path.join(dirpath, fname), project_root)
+                basename = fname[:-4]
+                file_by_basename[basename] = rel_path
+                abs_file = os.path.join(dirpath, fname)
+                try:
+                    with open(abs_file, encoding="utf-8", errors="replace") as f:
+                        source = f.read()
+                except OSError as e:
+                    skipped_files.append({"file": rel_path, "error": str(e)})
+                    continue
+                includes = re.findall(r"^include\s+(\w+)", source, re.MULTILINE)
+                graph[rel_path] = includes
+            if len(graph) >= MAX_IVY_FILES:
+                break
+
+        if relative_path is not None:
+            includes = graph.get(relative_path, [])
+            resolved_includes = [
+                {"module": inc, "resolved_path": file_by_basename.get(inc)}
+                for inc in includes
+            ]
+            target_basename = os.path.basename(relative_path)
+            if target_basename.endswith(".ivy"):
+                target_basename = target_basename[:-4]
+            included_by = [
+                fp for fp, fi in graph.items() if target_basename in fi
+            ]
+            transitive: set[str] = set()
+            stack = list(includes)
+            while stack:
+                mod = stack.pop()
+                if mod in transitive:
+                    continue
+                transitive.add(mod)
+                mod_path = file_by_basename.get(mod)
+                if mod_path and mod_path in graph:
+                    stack.extend(graph[mod_path])
+            return {
+                "file": relative_path,
+                "includes": resolved_includes,
+                "included_by": included_by,
+                "transitive_includes": sorted(transitive),
+                "transitive_include_count": len(transitive),
+                "skipped_files": skipped_files,
+                "via": "filesystem",
+            }
+        else:
+            file_summaries: dict[str, Any] = {}
+            for file_path, includes in graph.items():
+                file_summaries[file_path] = {
+                    "includes": includes,
+                    "include_count": len(includes),
+                }
+            return {
+                "files": file_summaries,
+                "total_files": len(file_summaries),
+                "total_include_edges": sum(len(inc) for inc in graph.values()),
+                "skipped_files": skipped_files,
+                "via": "filesystem",
+            }
 
     def apply(
         self,
@@ -505,10 +712,9 @@ class IvyIncludeGraphTool(Tool, ToolMarkerOptional):
     ) -> str:
         """
         Returns the include dependency graph for Ivy files in the project.
-        If a specific file is given, returns its direct includes and files
-        that include it. If no file is given, returns the full graph.
 
-        IMPORTANT: Scans .ivy files in the project for 'include' directives.
+        When the Ivy language server is running, uses ``ivy/includeGraph``
+        (accurate indexed data).  Falls back to filesystem scanning.
 
         :param relative_path: optional relative path to a specific .ivy file.
             If provided, returns includes/included_by for that file only.
@@ -520,110 +726,104 @@ class IvyIncludeGraphTool(Tool, ToolMarkerOptional):
         """
         project_root = self.get_project_root()
 
-        # Build the full include graph by scanning all .ivy files
-        graph: dict[str, list[str]] = {}  # file -> list of included module names
-        file_by_basename: dict[str, str] = {}  # module name -> relative path
-
-        _SKIP_DIRS = {
-            ".git",
-            ".venv",
-            "venv",
-            "node_modules",
-            "__pycache__",
-            "build",
-            "dist",
-            "submodules",
-        }
-        MAX_IVY_FILES = 5000
-        skipped_files: list[dict[str, str]] = []
-
-        for dirpath, dirnames, filenames in os.walk(project_root):
-            # Prune directories in-place to prevent os.walk from descending
-            dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
-
-            for fname in filenames:
-                if not fname.endswith(".ivy"):
-                    continue
-                if len(graph) >= MAX_IVY_FILES:
-                    break
-                rel_path = os.path.relpath(os.path.join(dirpath, fname), project_root)
-                basename = fname[:-4]  # strip .ivy
-                file_by_basename[basename] = rel_path
-
-                abs_file = os.path.join(dirpath, fname)
+        # For full graph (no relative_path), try LSP first
+        if relative_path is None:
+            ivy_ls = _get_ivy_language_server(self.agent)
+            if ivy_ls is not None:
                 try:
-                    with open(abs_file, encoding="utf-8", errors="replace") as f:
-                        source = f.read()
-                except OSError as e:
-                    skipped_files.append({"file": rel_path, "error": str(e)})
-                    continue
+                    payload = self._apply_via_lsp(ivy_ls)
+                    return self._limit_length(json.dumps(payload), max_answer_chars)
+                except Exception:
+                    log.debug("ivy/includeGraph via LSP failed, falling back to filesystem", exc_info=True)
 
-                includes = re.findall(r"^include\s+(\w+)", source, re.MULTILINE)
-                graph[rel_path] = includes
+        payload = self._apply_via_filesystem(project_root, relative_path)
+        return self._limit_length(json.dumps(payload), max_answer_chars)
 
-            if len(graph) >= MAX_IVY_FILES:
-                break
 
-        if relative_path is not None:
-            # Return focused view for a single file
-            includes = graph.get(relative_path, [])
-            resolved_includes = []
-            for inc in includes:
-                resolved_path = file_by_basename.get(inc)
-                resolved_includes.append(
-                    {
-                        "module": inc,
-                        "resolved_path": resolved_path,
-                    }
-                )
+class IvyServerStatusTool(Tool, ToolMarkerOptional):
+    """
+    Returns the current status of the Ivy language server, including mode
+    (full/light), version, uptime, tool availability, and indexing state.
 
-            # Find files that include this one
-            target_basename = os.path.basename(relative_path)
-            if target_basename.endswith(".ivy"):
-                target_basename = target_basename[:-4]
+    Requires the Ivy language server to be running.
+    """
 
-            included_by = []
-            for file_path, file_includes in graph.items():
-                if target_basename in file_includes:
-                    included_by.append(file_path)
+    def apply(
+        self,
+        max_answer_chars: int = -1,
+    ) -> str:
+        """
+        Queries the Ivy language server for its current operational status.
 
-            # Compute transitive includes
-            transitive: set[str] = set()
-            stack = list(includes)
-            while stack:
-                mod = stack.pop()
-                if mod in transitive:
-                    continue
-                transitive.add(mod)
-                mod_path = file_by_basename.get(mod)
-                if mod_path and mod_path in graph:
-                    stack.extend(graph[mod_path])
-
-            result = json.dumps(
-                {
-                    "file": relative_path,
-                    "includes": resolved_includes,
-                    "included_by": included_by,
-                    "transitive_includes": sorted(transitive),
-                    "transitive_include_count": len(transitive),
-                    "skipped_files": skipped_files,
-                }
-            )
-        else:
-            # Return full graph summary
-            file_summaries: dict[str, Any] = {}
-            for file_path, includes in graph.items():
-                file_summaries[file_path] = {
-                    "includes": includes,
-                    "include_count": len(includes),
-                }
-            result = json.dumps(
-                {
-                    "files": file_summaries,
-                    "total_files": len(file_summaries),
-                    "total_include_edges": sum(len(inc) for inc in graph.values()),
-                    "skipped_files": skipped_files,
-                }
+        :param max_answer_chars: if the output is longer than this number of
+            characters, no content will be returned. -1 means using the
+            default value.
+        :return: a JSON object with mode, version, uptime, tools, indexing state
+        """
+        ivy_ls = _get_ivy_language_server(self.agent)
+        if ivy_ls is None:
+            return self._limit_length(
+                json.dumps({"server_active": False, "error": "Ivy language server is not running"}),
+                max_answer_chars,
             )
 
-        return self._limit_length(result, max_answer_chars)
+        try:
+            status = ivy_ls.send_custom_request("ivy/serverStatus")
+            status["server_active"] = True
+            return self._limit_length(json.dumps(status), max_answer_chars)
+        except Exception as e:
+            return self._limit_length(
+                json.dumps({"server_active": True, "error": f"Failed to query server status: {e}"}),
+                max_answer_chars,
+            )
+
+
+class IvyTestScopeTool(Tool, ToolMarkerOptional):
+    """
+    Lists available test scopes and allows setting the active test scope
+    for the Ivy language server.  Test scopes control which test file's
+    include closure is used for diagnostics, code lenses, and navigation.
+
+    Requires the Ivy language server to be running.
+    """
+
+    def apply(
+        self,
+        action: str = "list",
+        test_file: str | None = None,
+        max_answer_chars: int = -1,
+    ) -> str:
+        """
+        Manages Ivy test scopes via the language server.
+
+        :param action: "list" to list all test scopes, "set" to set the active
+            test scope. Defaults to "list".
+        :param test_file: when action is "set", the test file path to activate.
+            Pass None to clear the active test scope.
+        :param max_answer_chars: if the output is longer than this number of
+            characters, no content will be returned. -1 means using the
+            default value.
+        :return: a JSON object with test scope information
+        """
+        ivy_ls = _get_ivy_language_server(self.agent)
+        if ivy_ls is None:
+            return self._limit_length(
+                json.dumps({"server_active": False, "error": "Ivy language server is not running"}),
+                max_answer_chars,
+            )
+
+        try:
+            if action == "set":
+                params: dict[str, Any] = {}
+                if test_file is not None:
+                    params["testFile"] = test_file
+                resp = ivy_ls.send_custom_request("ivy/setActiveTest", params)
+            else:
+                resp = ivy_ls.send_custom_request("ivy/listTests")
+            resp["server_active"] = True
+            return self._limit_length(json.dumps(resp), max_answer_chars)
+        except Exception as e:
+            return self._limit_length(
+                json.dumps({"server_active": True, "error": f"Test scope operation failed: {e}"}),
+                max_answer_chars,
+            )

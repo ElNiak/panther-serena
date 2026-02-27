@@ -52,6 +52,27 @@ class IvyLanguageServer(SolidLanguageServer):
             solidlsp_settings,
         )
 
+    def send_custom_request(self, method: str, params: dict | None = None) -> dict:
+        """Send a custom LSP request (e.g., ivy/verify) to the ivy-lsp server.
+
+        :param method: the custom method name, e.g. "ivy/verify", "ivy/serverStatus"
+        :param params: optional parameters dict for the request
+        :return: the server's response payload as a dict
+        :raises SolidLSPException: if the request returns an error
+        :raises RuntimeError: if the server is not started
+        """
+        if not self.server_started:
+            raise RuntimeError("Ivy language server is not started. Cannot send custom request.")
+        result = self.server.send_request(method, params)
+        if isinstance(result, dict):
+            return result
+        # send_request may return other PayloadLike types; coerce to dict
+        if isinstance(result, list):
+            return {"results": result}
+        if isinstance(result, bool):
+            return {"success": result}
+        return {}
+
     def get_stored_diagnostics(self, uri: str) -> list[dict[str, object]]:
         """Return stored diagnostics for the given URI, or empty list (defensive copy)."""
         with self._diagnostics_lock:
