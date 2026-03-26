@@ -76,7 +76,18 @@ class IvyLanguageServer(SolidLanguageServer):
         return self.DependencyProvider(self._custom_settings, self._ls_resources_dir)
 
     class DependencyProvider(LanguageServerDependencyProviderSinglePath):
+        """Discovers ivy_lsp on PATH and constructs the launch command."""
+
         def _get_or_install_core_dependency(self) -> str:
+            """Locate the ivy_lsp executable on the system PATH.
+
+            Unlike most other language servers in Serena, ivy_lsp is not
+            auto-downloaded. It must be installed separately (typically via
+            ``pip install ivy-lsp`` or from the panther_ivy package).
+
+            :return: path to the ivy_lsp executable
+            :raises FileNotFoundError: if ivy_lsp is not found on PATH
+            """
             ivy_lsp_path = shutil.which("ivy_lsp")
             if ivy_lsp_path is None:
                 raise FileNotFoundError(
@@ -89,10 +100,16 @@ class IvyLanguageServer(SolidLanguageServer):
             return ivy_lsp_path
 
         def _create_launch_command(self, core_path: str) -> list[str]:
+            """Build the launch command from the discovered ivy_lsp path."""
             return [core_path]
 
         def create_launch_command_env(self) -> dict[str, str]:
-            """Provides IVY_LSP_INCLUDE_PATHS and IVY_LSP_EXCLUDE_PATHS for the ivy_lsp process."""
+            """Provide environment variables for the ivy_lsp process.
+
+            Reads ``IVY_LSP_INCLUDE_PATHS`` (default: empty) and
+            ``IVY_LSP_EXCLUDE_PATHS`` (default: ``"submodules,test"``) from
+            the current environment and forwards them to the spawned process.
+            """
             include_paths = os.environ.get("IVY_LSP_INCLUDE_PATHS", "")
             exclude_paths = os.environ.get("IVY_LSP_EXCLUDE_PATHS", "submodules,test")
             return {

@@ -19,16 +19,13 @@ class TestIvyLanguageServer:
 
     @pytest.mark.parametrize("language_server", [Language.IVY], indirect=True)
     @pytest.mark.parametrize("repo_path", [Language.IVY], indirect=True)
-    def test_find_symbols(self, language_server: SolidLanguageServer, repo_path: Path) -> None:
-        """Test that workspace symbols are returned for an Ivy workspace.
+    def test_find_workspace_symbols(self, language_server: SolidLanguageServer, repo_path: Path) -> None:
+        """Test that workspace symbols are returned across the Ivy workspace.
 
-        ivy_lsp indexes symbols during startup. We trigger the cross-file
+        ivy_lsp indexes asynchronously on startup. We trigger the cross-file
         referencing wait (via request_definition) to ensure indexing completes
-        before querying workspace symbols, since ivy_lsp reports 0 symbols
-        via workspace/symbol until indexing finishes.
+        before querying, since ivy_lsp reports 0 symbols until indexing finishes.
         """
-        # Trigger the internal cross-file referencing wait so indexing completes.
-        # Line 3 (1-indexed) = line 2 (0-indexed): "include helper", char 8 = 'h' in "helper"
         language_server.request_definition(str(repo_path / "sample.ivy"), 2, 8)
 
         symbols = language_server.request_workspace_symbol("")
