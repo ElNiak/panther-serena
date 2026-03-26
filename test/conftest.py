@@ -248,6 +248,11 @@ def _determine_disabled_languages() -> list[Language]:
     if not al_tests_enabled:
         result.append(Language.AL)
 
+    # Disable Ivy tests if ivy_lsp is not available
+    ivy_tests_enabled = _sh.which("ivy_lsp") is not None
+    if not ivy_tests_enabled:
+        result.append(Language.IVY)
+
     return result
 
 
