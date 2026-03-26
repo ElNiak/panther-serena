@@ -6,10 +6,9 @@ import pathlib
 import shutil
 import threading
 
-from solidlsp.ls import SolidLanguageServer
+from solidlsp.ls import LanguageServerDependencyProvider, LanguageServerDependencyProviderSinglePath, SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
 from solidlsp.lsp_protocol_handler.lsp_types import InitializeParams
-from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
 from solidlsp.settings import SolidLSPSettings
 
 log = logging.getLogger(__name__)
@@ -34,20 +33,10 @@ class IvyLanguageServer(SolidLanguageServer):
         self._diagnostics_store: dict[str, list[dict[str, object]]] = {}
         self._diagnostics_lock = threading.Lock()
 
-        ivy_lsp_cmd = self._find_ivy_lsp()
-        include_paths = os.environ.get("IVY_LSP_INCLUDE_PATHS", "")
-        exclude_paths = os.environ.get("IVY_LSP_EXCLUDE_PATHS", "submodules,test")
         super().__init__(
             config,
             repository_root_path,
-            ProcessLaunchInfo(
-                cmd=ivy_lsp_cmd,
-                cwd=repository_root_path,
-                env={
-                    "IVY_LSP_INCLUDE_PATHS": include_paths,
-                    "IVY_LSP_EXCLUDE_PATHS": exclude_paths,
-                },
-            ),
+            None,
             "ivy",
             solidlsp_settings,
         )
@@ -83,28 +72,33 @@ class IvyLanguageServer(SolidLanguageServer):
         with self._diagnostics_lock:
             return {uri: list(diags) for uri, diags in self._diagnostics_store.items()}
 
-    @staticmethod
-    def _find_ivy_lsp() -> str:
-        """
-        Locate the ivy_lsp executable on the system PATH.
+    def _create_dependency_provider(self) -> LanguageServerDependencyProvider:
+        return self.DependencyProvider(self._custom_settings, self._ls_resources_dir)
 
-        Unlike most other language servers in Serena, ivy_lsp is not
-        auto-downloaded. It must be installed separately (typically via
-        pip install from the ivy-lsp package).
+    class DependencyProvider(LanguageServerDependencyProviderSinglePath):
+        def _get_or_install_core_dependency(self) -> str:
+            ivy_lsp_path = shutil.which("ivy_lsp")
+            if ivy_lsp_path is None:
+                raise FileNotFoundError(
+                    "ivy_lsp is not installed or is not in PATH.\n"
+                    "Install it via: pip install ivy-lsp\n"
+                    "Or from the panther_ivy package: pip install -e '.[lsp]'\n"
+                    "After installation, make sure 'ivy_lsp' is available on your PATH."
+                )
+            log.info(f"Found ivy_lsp at: {ivy_lsp_path}")
+            return ivy_lsp_path
 
-        :return: path to the ivy_lsp executable
-        :raises FileNotFoundError: if ivy_lsp is not found on PATH
-        """
-        ivy_lsp_path = shutil.which("ivy_lsp")
-        if ivy_lsp_path is None:
-            raise FileNotFoundError(
-                "ivy_lsp is not installed or is not in PATH.\n"
-                "Install it via: pip install ivy-lsp\n"
-                "Or from the panther_ivy package: pip install -e '.[lsp]'\n"
-                "After installation, make sure 'ivy_lsp' is available on your PATH."
-            )
-        log.info(f"Found ivy_lsp at: {ivy_lsp_path}")
-        return ivy_lsp_path
+        def _create_launch_command(self, core_path: str) -> list[str]:
+            return [core_path]
+
+        def create_launch_command_env(self) -> dict[str, str]:
+            """Provides IVY_LSP_INCLUDE_PATHS and IVY_LSP_EXCLUDE_PATHS for the ivy_lsp process."""
+            include_paths = os.environ.get("IVY_LSP_INCLUDE_PATHS", "")
+            exclude_paths = os.environ.get("IVY_LSP_EXCLUDE_PATHS", "submodules,test")
+            return {
+                "IVY_LSP_INCLUDE_PATHS": include_paths,
+                "IVY_LSP_EXCLUDE_PATHS": exclude_paths,
+            }
 
     @staticmethod
     def _get_initialize_params(repository_absolute_path: str) -> InitializeParams:
