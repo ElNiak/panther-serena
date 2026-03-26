@@ -3,6 +3,7 @@ Status of the `main` branch. Changes prior to the next official version change w
 
 
 * General:
+    * Add support for Ivy formal verification language via ivy_lsp
     * Add monorepo/multi-language support
         * Project configuration files (`project.yml`) can now define multiple languages.
           Auto-detection adds only the most prominent language by default.

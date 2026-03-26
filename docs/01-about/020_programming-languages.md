@@ -52,8 +52,10 @@ Some languages require additional installations or setup steps, as noted.
   (requires installation of `gopls`)
 * **Groovy**  
   (requires local groovy-language-server.jar setup via `GROOVY_LS_JAR_PATH` or configuration)
-* **Haskell**  
+* **Haskell**
   (automatically locates HLS via ghcup, stack, or system PATH; supports Stack and Cabal projects)
+* **Ivy**
+  (formal verification language for protocol modeling; requires installation of `ivy-lsp`: `pip install ivy-lsp`)
 * **Java**  
 * **JavaScript**
 * **Julia**
