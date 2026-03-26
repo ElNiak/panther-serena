@@ -1,0 +1,15 @@
+#lang ivy1.7
+
+object helper = {
+    type id
+    action get_id : id
+    relation active(X: id)
+
+    after init {
+        active(X) := false
+    }
+
+    action activate(x: id) = {
+        active(x) := true
+    }
+}
