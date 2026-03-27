@@ -73,10 +73,23 @@ class IvyLanguageServer(SolidLanguageServer):
             return {uri: list(diags) for uri, diags in self._diagnostics_store.items()}
 
     def _create_dependency_provider(self) -> LanguageServerDependencyProvider:
-        return self.DependencyProvider(self._custom_settings, self._ls_resources_dir)
+        return self.DependencyProvider(
+            self._custom_settings,
+            self._ls_resources_dir,
+            ivy_workspace=self.repository_root_path,
+        )
 
     class DependencyProvider(LanguageServerDependencyProviderSinglePath):
         """Discovers ivy_lsp on PATH and constructs the launch command."""
+
+        def __init__(
+            self,
+            custom_settings: "SolidLSPSettings.CustomLSSettings",
+            ls_resources_dir: str,
+            ivy_workspace: str | None = None,
+        ):
+            super().__init__(custom_settings, ls_resources_dir)
+            self._ivy_workspace = ivy_workspace
 
         def _get_or_install_core_dependency(self) -> str:
             """Locate the ivy_lsp executable on the system PATH.
@@ -106,16 +119,26 @@ class IvyLanguageServer(SolidLanguageServer):
         def create_launch_command_env(self) -> dict[str, str]:
             """Provide environment variables for the ivy_lsp process.
 
-            Reads ``IVY_LSP_INCLUDE_PATHS`` (default: empty) and
-            ``IVY_LSP_EXCLUDE_PATHS`` (default: ``"submodules,test"``) from
-            the current environment and forwards them to the spawned process.
+            Sets ``IVY_LSP_WORKSPACE`` to the repository root path so ivy-lsp
+            uses it as the workspace root. Also forwards include/exclude paths
+            and any explicit workspace env var overrides from the current
+            environment.
             """
             include_paths = os.environ.get("IVY_LSP_INCLUDE_PATHS", "")
             exclude_paths = os.environ.get("IVY_LSP_EXCLUDE_PATHS", "submodules,test")
-            return {
+            env: dict[str, str] = {
                 "IVY_LSP_INCLUDE_PATHS": include_paths,
                 "IVY_LSP_EXCLUDE_PATHS": exclude_paths,
             }
+            # Set workspace to repository root path (programmatic default)
+            if self._ivy_workspace:
+                env["IVY_LSP_WORKSPACE"] = self._ivy_workspace
+            # Caller's environment variables take precedence over programmatic defaults
+            for var in ("IVY_LSP_WORKSPACE", "IVY_WORKSPACE_ROOT", "IVY_LSP_WORKSPACE_HINT"):
+                val = os.environ.get(var)
+                if val:
+                    env[var] = val
+            return env
 
     @staticmethod
     def _get_initialize_params(repository_absolute_path: str) -> InitializeParams:
@@ -213,7 +236,7 @@ class IvyLanguageServer(SolidLanguageServer):
         capabilities = init_response.get("capabilities", {})
         if "textDocumentSync" not in capabilities:
             raise RuntimeError(
-                "ivy_lsp did not report textDocumentSync capability. " "Check that ivy_lsp is correctly installed and up to date."
+                "ivy_lsp did not report textDocumentSync capability. Check that ivy_lsp is correctly installed and up to date."
             )
 
         for cap_name in [
