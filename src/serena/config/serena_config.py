@@ -183,6 +183,10 @@ class ProjectConfig(SharedConfig):
     initial_prompt: str = ""
     encoding: str = DEFAULT_SOURCE_FILE_ENCODING
 
+    # Ivy-specific workspace configuration (only used when 'ivy' is in languages)
+    ivy_include_paths: list[str] = field(default_factory=list)
+    ivy_exclude_paths: list[str] = field(default_factory=lambda: ["submodules", "test"])
+
     SERENA_DEFAULT_PROJECT_FILE = "project.yml"
     FIELDS_WITHOUT_DEFAULTS = {"project_name", "languages"}
     YAML_COMMENT_NORMALISATION = YamlCommentNormalisation.LEADING
@@ -193,6 +197,42 @@ class ProjectConfig(SharedConfig):
 
     def _tostring_includes(self) -> list[str]:
         return ["project_name"]
+
+    @staticmethod
+    def _generate_ivy_workspace(
+        project_root: str | Path,
+        include_paths: list[str] | None = None,
+        exclude_paths: list[str] | None = None,
+    ) -> None:
+        """Generate a .ivyworkspace v3 marker file at the project root.
+
+        Only creates the file if it doesn't already exist, to avoid
+        overwriting user customizations.
+        """
+        import json
+
+        workspace_path = Path(project_root) / ".ivyworkspace"
+        if workspace_path.exists():
+            log.info(".ivyworkspace already exists at %s, skipping generation", workspace_path)
+            return
+
+        workspace_config: dict[str, Any] = {
+            "version": 3,
+            "project_type": "standalone",
+            "scope_detection": "auto",
+            "workspace_layers": [
+                {
+                    "id": "main",
+                    "include_paths": include_paths if include_paths else ["."],
+                    "priority": 1,
+                }
+            ],
+        }
+        if exclude_paths:
+            workspace_config["exclude_paths"] = exclude_paths
+
+        log.info("Generating .ivyworkspace at %s", workspace_path)
+        workspace_path.write_text(json.dumps(workspace_config, indent=2) + "\n")
 
     @classmethod
     def autogenerate(
@@ -270,7 +310,18 @@ class ProjectConfig(SharedConfig):
                 project_yml_path = cls.path_to_project_yml(project_root)
                 log.info("Saving project configuration to %s", project_yml_path)
                 save_yaml(project_yml_path, config_with_comments)
-            return cls._from_dict(config_with_comments)
+
+            config_instance = cls._from_dict(config_with_comments)
+
+            # Auto-generate .ivyworkspace if Ivy is configured
+            if "ivy" in languages_to_use:
+                cls._generate_ivy_workspace(
+                    project_root,
+                    include_paths=config_instance.ivy_include_paths or None,
+                    exclude_paths=config_instance.ivy_exclude_paths or None,
+                )
+
+            return config_instance
 
     @classmethod
     def path_to_project_yml(cls, project_root: str | Path) -> str:
@@ -363,6 +414,8 @@ class ProjectConfig(SharedConfig):
             base_modes=data["base_modes"],
             default_modes=data["default_modes"],
             symbol_info_budget=symbol_info_budget,
+            ivy_include_paths=data["ivy_include_paths"],
+            ivy_exclude_paths=data["ivy_exclude_paths"],
         )
 
     def _to_yaml_dict(self) -> dict:
@@ -401,6 +454,14 @@ class ProjectConfig(SharedConfig):
         if not was_complete:
             log.info("Project configuration in %s was incomplete, re-saving with default values for missing fields", yaml_path)
             project_config.save(project_root)
+
+        # Auto-generate .ivyworkspace if Ivy is configured and marker is missing
+        if Language.IVY in project_config.languages:
+            cls._generate_ivy_workspace(
+                project_root,
+                include_paths=project_config.ivy_include_paths or None,
+                exclude_paths=project_config.ivy_exclude_paths or None,
+            )
 
         return project_config
 

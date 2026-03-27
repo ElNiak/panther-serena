@@ -31,6 +31,12 @@ languages: ["python"]
 # For a list of possible encodings, see https://docs.python.org/3.11/library/codecs.html#standard-encodings
 encoding: "utf-8"
 
+# Ivy-specific workspace configuration (only relevant if 'ivy' is in languages).
+# When Ivy is configured, a .ivyworkspace v3 marker file is auto-generated at the
+# project root (if one doesn't already exist) using these paths.
+# ivy_include_paths: []
+# ivy_exclude_paths: [submodules, test]
+
 # The language backend to use for this project.
 # If not set, the global setting from serena_config.yml is used.
 # Valid values: LSP, JetBrains
