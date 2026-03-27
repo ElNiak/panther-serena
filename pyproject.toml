@@ -39,6 +39,11 @@ dependencies = [
   "beautifulsoup4>=4.14.2",
 ]
 
+[tool.uv.sources]
+ivy-lsp = { path = "../ivy-lsp", editable = true }
+# panther_ms_ivy requires CMAKE_POLICY_VERSION_MINIMUM=3.5 for building.
+# Install manually: CMAKE_POLICY_VERSION_MINIMUM=3.5 pip install ../../[z3]
+
 [[tool.uv.index]]
 name = "testpypi"
 url = "https://test.pypi.org/simple/"
@@ -78,6 +83,7 @@ dev = [
 ]
 agno = ["agno>=2.2.1", "sqlalchemy>=2.0.40"]
 google = ["google-genai>=1.8.0"]
+ivy = ["panther_ms_ivy[z3]"]  # Full Ivy toolchain (parser + Z3 solver) for document symbols
 
 [project.urls]
 Homepage = "https://github.com/oraios/serena"
