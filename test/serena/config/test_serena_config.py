@@ -1,3 +1,4 @@
+import json
 import logging
 import shutil
 import tempfile
@@ -314,3 +315,86 @@ class TestEffectiveLanguageBackend:
             agent.activate_project_from_path_or_name("proj2")
         finally:
             agent.shutdown(timeout=5)
+
+
+class TestGenerateIvyWorkspace:
+    """Tests for ProjectConfig._generate_ivy_workspace auto-generation."""
+
+    def test_creates_marker_when_missing(self, tmp_path):
+        """Marker file is created with v3 schema when absent."""
+        ProjectConfig._generate_ivy_workspace(tmp_path)
+
+        marker = tmp_path / ".ivyworkspace"
+        assert marker.exists()
+        data = json.loads(marker.read_text())
+        assert data["version"] == 3
+        assert data["project_type"] == "standalone"
+        assert data["workspace_layers"][0]["include_paths"] == ["."]
+
+    def test_does_not_overwrite_existing_marker(self, tmp_path):
+        """Existing marker is preserved — no silent overwrite."""
+        marker = tmp_path / ".ivyworkspace"
+        original_content = '{"version": 2, "custom": true}'
+        marker.write_text(original_content)
+
+        ProjectConfig._generate_ivy_workspace(tmp_path)
+
+        assert marker.read_text() == original_content
+
+    def test_custom_include_paths(self, tmp_path):
+        """Custom include_paths are written to the workspace_layers."""
+        ProjectConfig._generate_ivy_workspace(tmp_path, include_paths=["src", "models"])
+
+        data = json.loads((tmp_path / ".ivyworkspace").read_text())
+        assert data["workspace_layers"][0]["include_paths"] == ["src", "models"]
+
+    def test_custom_exclude_paths(self, tmp_path):
+        """Custom exclude_paths are written at the top level."""
+        ProjectConfig._generate_ivy_workspace(tmp_path, exclude_paths=["vendor", "test"])
+
+        data = json.loads((tmp_path / ".ivyworkspace").read_text())
+        assert data["exclude_paths"] == ["vendor", "test"]
+
+    def test_no_exclude_paths_when_empty(self, tmp_path):
+        """exclude_paths key is omitted when the list is empty."""
+        ProjectConfig._generate_ivy_workspace(tmp_path, exclude_paths=[])
+
+        data = json.loads((tmp_path / ".ivyworkspace").read_text())
+        assert "exclude_paths" not in data
+
+    def test_autogenerate_creates_marker_for_ivy_project(self, tmp_path):
+        """autogenerate() triggers .ivyworkspace creation when Ivy is in languages."""
+        # Create an .ivy file so language detection finds Ivy
+        (tmp_path / "model.ivy").write_text("#lang ivy1.8\ntype packet")
+
+        config = ProjectConfig.autogenerate(tmp_path, languages=[Language.IVY], save_to_disk=False)
+
+        marker = tmp_path / ".ivyworkspace"
+        assert marker.exists()
+        data = json.loads(marker.read_text())
+        assert data["version"] == 3
+
+    def test_autogenerate_skips_marker_for_non_ivy_project(self, tmp_path):
+        """autogenerate() does NOT create .ivyworkspace for non-Ivy projects."""
+        (tmp_path / "main.py").write_text("print('hello')")
+
+        ProjectConfig.autogenerate(tmp_path, save_to_disk=False)
+
+        assert not (tmp_path / ".ivyworkspace").exists()
+
+    def test_load_creates_marker_for_ivy_project(self, tmp_path):
+        """load() triggers .ivyworkspace creation when Ivy is configured."""
+        # Set up a minimal project.yml with ivy
+        serena_dir = tmp_path / ".serena"
+        serena_dir.mkdir()
+        # First autogenerate a valid project.yml, then modify it
+        (tmp_path / "model.ivy").write_text("#lang ivy1.8\ntype packet")
+        config = ProjectConfig.autogenerate(tmp_path, languages=[Language.IVY], save_to_disk=True)
+        # Remove the auto-generated marker to test load() path
+        (tmp_path / ".ivyworkspace").unlink()
+        assert not (tmp_path / ".ivyworkspace").exists()
+
+        # Now load — should re-create the marker
+        ProjectConfig.load(tmp_path)
+
+        assert (tmp_path / ".ivyworkspace").exists()
