@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-def _get_ivy_language_server(agent: Any) -> "IvyLanguageServer | None":  # noqa: UP007
+def _get_ivy_language_server(agent: Any) -> "IvyLanguageServer | None":
     """Resolve the IvyLanguageServer instance from the agent, or None."""
     from solidlsp.language_servers.ivy_language_server import IvyLanguageServer
 

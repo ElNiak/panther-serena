@@ -160,9 +160,9 @@ def bump(
         subprocess.run(["git", "tag", tag], check=True)
         print(f"\nCreated tag {tag}. Run:\n  git push && git push origin {tag}")
     elif not no_commit:
-        print(f"\nCommitted. Tag skipped (--no-tag).")
+        print("\nCommitted. Tag skipped (--no-tag).")
     else:
-        print(f"\nFiles updated. Commit and tag skipped.")
+        print("\nFiles updated. Commit and tag skipped.")
 
 
 def main() -> None:

@@ -6,6 +6,7 @@ from solidlsp import SolidLanguageServer
 from solidlsp.ls_config import Language
 from test.conftest import language_tests_enabled
 
+
 @pytest.mark.skipif(not language_tests_enabled(Language.IVY), reason="ivy_lsp not available")
 @pytest.mark.ivy
 class TestIvyLanguageServer:
@@ -26,7 +27,7 @@ class TestIvyLanguageServer:
         Install via: pip install serena[ivy]
         """
         try:
-            import ivy.ivy_parser  # noqa: F811
+            import ivy.ivy_parser
         except ImportError:
             pytest.skip("panther_ms_ivy[z3] not installed (install with: pip install serena[ivy])")
 
