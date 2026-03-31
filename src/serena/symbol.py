@@ -1,11 +1,12 @@
+import copy
 import json
 import logging
 import os
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import asdict, dataclass
 from time import perf_counter
-from typing import TYPE_CHECKING, Any, Generic, Literal, NotRequired, Self, TypedDict, TypeVar, Union
+from typing import Any, Generic, Literal, NotRequired, Self, TypedDict, TypeVar
 
 from sensai.util.string import ToStringMixin
 
@@ -17,9 +18,6 @@ from solidlsp.ls_types import Position, SymbolKind, UnifiedSymbolInformation
 
 from .ls_manager import LanguageServerManager
 from .project import Project
-
-if TYPE_CHECKING:
-    from .agent import SerenaAgent
 
 log = logging.getLogger(__name__)
 NAME_PATH_SEP = "/"
@@ -412,8 +410,23 @@ class LanguageServerSymbol(Symbol, ToStringMixin):
         string representation of the symbol kind (name attribute of the `SymbolKind` enum item)
         """
         children: NotRequired[list["LanguageServerSymbol.OutputDict"]]
+        content_around_reference: NotRequired[str]
+        """set by :class:`FindReferencingSymbolsTool` when including surrounding code lines"""
+        reference_line: NotRequired[int]
+        """line number of the reference, set by :class:`FindReferencingSymbolsTool`"""
 
-    OutputDictKey = Literal["name", "name_path", "relative_path", "location", "body_location", "body", "kind", "children"]
+    OutputDictKey = Literal[
+        "name",
+        "name_path",
+        "relative_path",
+        "location",
+        "body_location",
+        "body",
+        "kind",
+        "children",
+        "content_around_reference",
+        "reference_line",
+    ]
 
     def to_dict(
         self,
@@ -426,6 +439,8 @@ class LanguageServerSymbol(Symbol, ToStringMixin):
         body: bool = False,
         body_location: bool = False,
         children_body: bool = False,
+        children_name_path: bool | None = None,
+        children_name: bool | None = None,
         relative_path: bool = False,
         child_inclusion_predicate: Callable[[Self], bool] | None = None,
     ) -> OutputDict:
@@ -442,6 +457,8 @@ class LanguageServerSymbol(Symbol, ToStringMixin):
             Note that the body of the children is part of the body of the parent symbol,
             so there is usually no need to set this to True unless you want process the output
             and pass the children without passing the parent body to the LM.
+        :param children_name_path: whether to include the name path of the children; if None, defaults to the value of `name_path`
+        :param children_name: whether to include the name of the children; if None, defaults to the value of `name`
         :param relative_path: whether to include the relative path of the symbol.
             If `location` is True, this defines whether to include the path in the location entry.
             If `location` is False, this defines whether to include the relative path as a top-level entry.
@@ -451,6 +468,11 @@ class LanguageServerSymbol(Symbol, ToStringMixin):
         :return: a dictionary representation of the symbol
         """
         result: LanguageServerSymbol.OutputDict = {}
+
+        if children_name_path is None:
+            children_name_path = name_path
+        if children_name is None:
+            children_name = name
 
         if name_path:
             result["name_path"] = self.get_name_path()
@@ -482,8 +504,8 @@ class LanguageServerSymbol(Symbol, ToStringMixin):
                     continue
                 children.append(
                     c.to_dict(
-                        name_path=name_path,
-                        name=name,
+                        name_path=children_name_path,
+                        name=children_name,
                         kind=kind,
                         location=location,
                         body_location=body_location,
@@ -536,19 +558,12 @@ class ReferenceInLanguageServerSymbol(ToStringMixin):
 
 
 class LanguageServerSymbolRetriever:
-    def __init__(self, ls: SolidLanguageServer | LanguageServerManager, agent: Union["SerenaAgent", None] = None) -> None:
+    def __init__(self, project: Project) -> None:
         """
-        :param ls: the language server or language server manager to use for symbol retrieval and editing operations.
-        :param agent: the agent to use (only needed for marking files as modified). You can pass None if you don't
-            need an agent to be aware of file modifications performed by the symbol manager.
+        :param project: the project instance
         """
-        if isinstance(ls, SolidLanguageServer):
-            ls_manager = LanguageServerManager({ls.language: ls})
-        else:
-            ls_manager = ls
-        assert isinstance(ls_manager, LanguageServerManager)
-        self._ls_manager: LanguageServerManager = ls_manager
-        self.agent = agent
+        self._ls_manager: LanguageServerManager = project.get_language_server_manager_or_raise()
+        self.project = project
 
     def _request_info(self, relative_file_path: str, line: int, column: int, file_buffer: LSPFileBuffer | None = None) -> str | None:
         """Retrieves information (in a sanitized format) about the symbol at the desired location,
@@ -588,16 +603,11 @@ class LanguageServerSymbolRetriever:
             return None
         return self._request_info(relative_file_path=symbol.relative_path, line=symbol.line, column=symbol.column)  # type: ignore[arg-type]
 
-    def _get_symbol_info_budget(self, default_budget: float = 10) -> float:
-        """Project -> global -> default"""
-        symbol_info_budget = default_budget
-        if self.agent is not None:
-            symbol_info_budget = self.agent.serena_config.symbol_info_budget
-            active_project = self.agent.get_active_project()
-            if active_project is not None:
-                project_symbol_info_budget = active_project.project_config.symbol_info_budget
-                if project_symbol_info_budget is not None:
-                    symbol_info_budget = project_symbol_info_budget
+    def _get_symbol_info_budget(self) -> float:
+        symbol_info_budget = self.project.serena_config.symbol_info_budget
+        project_symbol_info_budget = self.project.project_config.symbol_info_budget
+        if project_symbol_info_budget is not None:
+            symbol_info_budget = project_symbol_info_budget
         return symbol_info_budget
 
     def request_info_for_symbol_batch(
@@ -696,8 +706,8 @@ class LanguageServerSymbolRetriever:
 
         return info_by_symbol
 
-    def get_root_path(self) -> str:
-        return self._ls_manager.get_root_path()
+    def can_analyze_file(self, relative_file_path: str) -> bool:
+        return self._ls_manager.has_suitable_ls_for_file(relative_file_path)
 
     def get_language_server(self, relative_path: str) -> SolidLanguageServer:
         """:param relative_path: relative path to a file"""
@@ -716,7 +726,16 @@ class LanguageServerSymbolRetriever:
         optionally limited to a specific file and filtered by kind.
         """
         symbols: list[LanguageServerSymbol] = []
-        for lang_server in self._ls_manager.iter_language_servers():
+        if within_relative_path and os.path.isfile(os.path.join(self.project.project_root, within_relative_path)):
+            """
+            For a specific file, use get_language_server to select the best LS for the file type
+            (consistent with get_symbol_overview). This ensures e.g. PHP files are served by the
+            PHP language server rather than being rejected by all LSes via is_ignored_path.
+            """
+            lang_servers: Iterable[SolidLanguageServer] = [self._ls_manager.get_language_server(within_relative_path)]
+        else:
+            lang_servers = self._ls_manager.iter_language_servers()
+        for lang_server in lang_servers:
             symbol_roots = lang_server.request_full_symbol_tree(within_relative_path=within_relative_path)
             for root in symbol_roots:
                 symbols.extend(
@@ -947,35 +966,42 @@ class SymbolDictGrouper(Generic[TSymbolDict], ABC):
         self._group_children_keys = group_children_keys
         self._collapse_singleton = collapse_singleton
 
-    def _group_by(self, l: list[dict], keys: list[str], children_keys: list[str]) -> dict[str, Any]:
-        assert len(keys) > 0, "keys must not be empty"
-        # group by the first key
-        grouped: dict[str, Any] = {}
-        for item in l:
-            key_value = item.pop(keys[0], "unknown")
-            if key_value not in grouped:
-                grouped[key_value] = []
-            grouped[key_value].append(item)
-        if len(keys) > 1:
+    def _group_by(self, l: list[dict], keys: list[str], children_keys: list[str], is_children: bool) -> dict[str, Any] | list[Any]:
+        """
+        :param l: the list of symbol dictionaries to group
+        :param keys: the keys to group by
+        :param children_keys: the keys to group the children by
+        :param is_children: whether this is a children grouping operation
+        :return: the (grouped) symbols
+        """
+        if len(keys) > 0:
+            # group by the first key
+            grouped: dict[str, Any] = {}
+            for item in l:
+                key_value = item.pop(keys[0], "unknown")
+                if key_value not in grouped:
+                    grouped[key_value] = []
+                grouped[key_value].append(item)
             # continue grouping by the remaining keys
             for k, group in grouped.items():
-                grouped[k] = self._group_by(group, keys[1:], children_keys)
+                grouped[k] = self._group_by(group, keys[1:], children_keys, is_children=is_children)
+            return grouped
         else:
             # grouping is complete; now group the children if necessary
-            if children_keys:
-                for k, group in grouped.items():
-                    for item in group:
-                        if self._children_key in item:
-                            children = item[self._children_key]
-                            item[self._children_key] = self._group_by(children, children_keys, children_keys)
-            # post-process final group items
-            grouped = {k: [self._transform_item(i) for i in v] for k, v in grouped.items()}
-        return grouped
+            for item in l:
+                if self._children_key in item:
+                    children = item[self._children_key]
+                    item[self._children_key] = self._group_by(children, children_keys, children_keys, is_children=True)
+            # post-process final items
+            return [self._transform_item(item, is_children) for item in l]
 
-    def _transform_item(self, item: dict) -> dict:
+    def _transform_item(self, item: dict, is_child: bool) -> dict:
         """
         Post-processes a final group item (which has been regrouped, i.e. some keys may have been removed),
         collapsing singleton items (and items containing only a single non-children key)
+
+        :param item: the item to post-process
+        :param is_child: whether the item is a child item
         """
         if self._collapse_singleton:
             if len(item) == 1:
@@ -991,12 +1017,15 @@ class SymbolDictGrouper(Generic[TSymbolDict], ABC):
                 return new_item
         return item
 
-    def group(self, symbols: list[TSymbolDict]) -> GroupedSymbolDict:
+    def group(self, symbols: list[TSymbolDict]) -> GroupedSymbolDict | list:
         """
         :param symbols: the symbols to group
-        :return: dictionary with the symbols grouped as defined at construction
+        :return: dictionary with the symbols grouped as defined at construction if at least one key was used for grouping,
+            otherwise the list of symbols (potentially transformed)
         """
-        return self._group_by(symbols, self._group_keys, self._group_children_keys)  # type: ignore
+        # avoid side effects by working on a deep-copy
+        symbols_copy = copy.deepcopy(symbols)
+        return self._group_by(symbols_copy, self._group_keys, self._group_children_keys, is_children=False)  # type: ignore
 
 
 class LanguageServerSymbolDictGrouper(SymbolDictGrouper[LanguageServerSymbol.OutputDict]):
@@ -1017,16 +1046,22 @@ class JetBrainsSymbolDictGrouper(SymbolDictGrouper[jb.SymbolDTO]):
         collapse_singleton: bool = False,
         map_name_path_to_name: bool = False,
     ) -> None:
+        """
+        :param group_keys: keys to group main symbols by
+        :param group_children_keys: keys to group child symbols by
+        :param collapse_singleton: whether to collapse singleton symbol dictionaries
+        :param map_name_path_to_name: whether to transform the "name_path" key of child symbols to the bare "name"
+        """
         super().__init__(jb.SymbolDTO, "children", group_keys, group_children_keys, collapse_singleton)
         self._map_name_path_to_name = map_name_path_to_name
 
-    def _transform_item(self, item: dict) -> dict:
-        if self._map_name_path_to_name:
+    def _transform_item(self, item: dict, is_child: bool) -> dict:
+        if self._map_name_path_to_name and is_child:
             # {"name_path: "Class/myMethod"} -> {"name: "myMethod"}
             new_item = dict(item)
             if "name_path" in item:
                 name_path = new_item.pop("name_path")
                 new_item["name"] = name_path.split("/")[-1]
-            return super()._transform_item(new_item)
+            return super()._transform_item(new_item, is_child)
         else:
-            return super()._transform_item(item)
+            return super()._transform_item(item, is_child)

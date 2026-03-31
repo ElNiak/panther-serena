@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from collections.abc import Iterator, Sequence
 from logging import Logger
 from pathlib import Path
@@ -187,7 +188,7 @@ class TopLevelCommands(AutoRegisteringGroup):
     @click.option(
         "--host",
         type=str,
-        default="0.0.0.0",
+        default="127.0.0.1",
         show_default=True,
         help="Listen address for the MCP server (when using corresponding transport).",
     )
@@ -349,6 +350,61 @@ class TopLevelCommands(AutoRegisteringGroup):
             print(instr)
         else:
             print(f"{prefix}\n{instr}\n{postfix}")
+
+    @staticmethod
+    @click.command(
+        "start-project-server",
+        help="Starts the Serena project server, which exposes project querying capabilities via HTTP.",
+        context_settings={"max_content_width": _MAX_CONTENT_WIDTH},
+    )
+    @click.option(
+        "--host",
+        type=str,
+        default="127.0.0.1",
+        show_default=True,
+        help="Listen address for the project server.",
+    )
+    @click.option(
+        "--port",
+        type=int,
+        default=None,
+        help="Listen port for the project server (default: ProjectServer.PORT).",
+    )
+    @click.option(
+        "--log-level",
+        type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]),
+        default=None,
+        help="Override log level in config.",
+    )
+    def start_project_server(
+        host: str,
+        port: int | None,
+        log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] | None,
+    ) -> None:
+        from serena.project_server import ProjectServer
+
+        # initialize logging
+        Logger.root.setLevel(logging.INFO)
+        formatter = logging.Formatter(SERENA_LOG_FORMAT)
+        stderr_handler = logging.StreamHandler(stream=sys.stderr)
+        stderr_handler.formatter = formatter
+        Logger.root.addHandler(stderr_handler)
+        log_path = SerenaPaths().get_next_log_file_path("project-server")
+        file_handler = logging.FileHandler(log_path, mode="w")
+        file_handler.formatter = formatter
+        Logger.root.addHandler(file_handler)
+
+        if log_level is not None:
+            Logger.root.setLevel(logging.getLevelNamesMapping()[log_level])
+
+        log.info("Starting Serena project server")
+        log.info("Storing logs in %s", log_path)
+
+        server = ProjectServer()
+        run_kwargs: dict[str, Any] = {"host": host}
+        if port is not None:
+            run_kwargs["port"] = port
+        server.run(**run_kwargs)
 
 
 class ModeCommands(AutoRegisteringGroup):
@@ -544,7 +600,8 @@ class ProjectCommands(AutoRegisteringGroup):
         :return: the RegisteredProject instance
         """
         project_root = Path(project_path).resolve()
-        yml_path = ProjectConfig.path_to_project_yml(project_root)
+        serena_config = SerenaConfig.from_config_file()
+        yml_path = serena_config.get_project_yml_location(str(project_root))
         if os.path.exists(yml_path):
             raise FileExistsError(f"Project file {yml_path} already exists.")
 
@@ -558,14 +615,14 @@ class ProjectCommands(AutoRegisteringGroup):
                     raise ValueError(f"Unknown language '{lang}'. Supported: {all_langs}")
 
         generated_conf = ProjectConfig.autogenerate(
-            project_root=project_path, project_name=name, languages=languages if languages else None, interactive=True
+            project_root=project_path,
+            serena_config=serena_config,
+            project_name=name,
+            languages=languages if languages else None,
+            interactive=True,
         )
-        yml_path = ProjectConfig.path_to_project_yml(project_path)
         languages_str = ", ".join([lang.value for lang in generated_conf.languages]) if generated_conf.languages else "N/A"
         click.echo(f"Generated project with languages {{{languages_str}}} at {yml_path}.")
-
-        # add to SerenaConfig's list of registered projects
-        serena_config = SerenaConfig.from_config_file()
         registered_project = serena_config.get_registered_project(str(project_root))
         if registered_project is None:
             registered_project = RegisteredProject(str(project_root), generated_conf)
@@ -640,9 +697,7 @@ class ProjectCommands(AutoRegisteringGroup):
         serena_config = SerenaConfig.from_config_file()
         proj = registered_project.get_project_instance(serena_config=serena_config)
         click.echo(f"Indexing symbols in {proj} …")
-        ls_mgr = proj.create_language_server_manager(
-            log_level=lvl, ls_timeout=timeout, ls_specific_settings=serena_config.ls_specific_settings
-        )
+        ls_mgr = proj.create_language_server_manager()
         try:
             log_file = os.path.join(proj.project_root, ".serena", "logs", "indexing.txt")
 
@@ -651,6 +706,7 @@ class ProjectCommands(AutoRegisteringGroup):
             collected_exceptions: list[Exception] = []
             files_failed = []
             language_file_counts: dict[Language, int] = collections.defaultdict(lambda: 0)
+            last_save_time = time.monotonic()
             for i, f in enumerate(tqdm(files, desc="Indexing")):
                 try:
                     ls = ls_mgr.get_language_server(f)
@@ -660,8 +716,10 @@ class ProjectCommands(AutoRegisteringGroup):
                     log.error(f"Failed to index {f}, continuing.")
                     collected_exceptions.append(e)
                     files_failed.append(f)
-                if (i + 1) % 10 == 0:
+                now = time.monotonic()
+                if now - last_save_time >= 30:
                     ls_mgr.save_all_caches()
+                    last_save_time = now
             reported_language_file_counts = {k.value: v for k, v in language_file_counts.items()}
             click.echo(f"Indexed files per language: {dict_string(reported_language_file_counts, brackets=None)}")
             ls_mgr.save_all_caches()
@@ -753,6 +811,9 @@ class ProjectCommands(AutoRegisteringGroup):
         logging.configure(level=logging.INFO)
         project_path = os.path.abspath(project)
         serena_config = SerenaConfig.from_config_file()
+        serena_config.language_backend = LanguageBackend.LSP
+        serena_config.gui_log_window = False
+        serena_config.web_dashboard = False
         proj = Project.load(project_path, serena_config=serena_config)
 
         # Create log file with timestamp
@@ -767,9 +828,7 @@ class ProjectCommands(AutoRegisteringGroup):
             try:
                 # Create SerenaAgent with dashboard disabled
                 log.info("Creating SerenaAgent with disabled dashboard...")
-                serena_config = SerenaConfig.from_config_file()
-                serena_config.gui_log_window = False
-                serena_config.web_dashboard = False
+
                 agent = SerenaAgent(project=project_path, serena_config=serena_config)
                 log.info("SerenaAgent created successfully")
 
@@ -803,7 +862,7 @@ class ProjectCommands(AutoRegisteringGroup):
                 # Test 1: Get symbols overview
                 log.info("Testing GetSymbolsOverviewTool on file: %s", target_file)
                 overview_data = agent.execute_task(lambda: overview_tool.get_symbol_overview(target_file))
-                log.info("GetSymbolsOverviewTool returned %d symbols", len(overview_data))
+                log.info(f"GetSymbolsOverviewTool returned: {overview_data}")
 
                 if not overview_data:
                     log.error("No symbols found in file %s", target_file)
@@ -824,8 +883,8 @@ class ProjectCommands(AutoRegisteringGroup):
                     selected_symbol = overview_data[0]
                     log.info("No class or function found, using first available symbol")
 
-                symbol_name = selected_symbol.get("name_path", "unknown")
-                symbol_kind = selected_symbol.get("kind", "unknown")
+                symbol_name = selected_symbol["name"]
+                symbol_kind = selected_symbol["kind"]
                 log.info("Using symbol for testing: %s (kind: %s)", symbol_name, symbol_kind)
 
                 # Test 2: FindSymbolTool

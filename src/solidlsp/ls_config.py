@@ -53,8 +53,14 @@ class Language(str, Enum):
     BASH = "bash"
     ZIG = "zig"
     LUA = "lua"
+    LUAU = "luau"
+    """Luau Language Server for Roblox's Luau language (typed Lua 5.1 superset).
+    Uses luau-lsp by JohnnyMorganz. Automatically downloads the binary if not found.
+    Supports .luau files. Configure via .luaurc in the project root.
+    """
     NIX = "nix"
     ERLANG = "erlang"
+    OCAML = "ocaml"
     AL = "al"
     IVY = "ivy"
     FSHARP = "fsharp"
@@ -63,6 +69,7 @@ class Language(str, Enum):
     JULIA = "julia"
     FORTRAN = "fortran"
     HASKELL = "haskell"
+    LEAN4 = "lean4"
     GROOVY = "groovy"
     VUE = "vue"
     POWERSHELL = "powershell"
@@ -81,6 +88,8 @@ class Language(str, Enum):
     """Use the typescript language server through the natively bundled vscode extension via https://github.com/yioneko/vtsls"""
     PYTHON_JEDI = "python_jedi"
     """Jedi language server for Python (instead of pyright, which is the default)"""
+    PYTHON_TY = "python_ty"
+    """Ty language server for Python (instead of pyright, which is the default)."""
     CSHARP_OMNISHARP = "csharp_omnisharp"
     """OmniSharp language server for C# (instead of the default csharp-ls by microsoft).
     Currently has problems with finding references, and generally seems less stable and performant.
@@ -106,10 +115,28 @@ class Language(str, Enum):
     """TOML language server using Taplo.
     Supports TOML validation, formatting, and schema support.
     """
+    HLSL = "hlsl"
+    """Shader language server using shader-language-server (antaalt/shader-sense).
+    Supports .hlsl, .hlsli, .fx, .fxh, .cginc, .compute, .shader, .glsl, .vert, .frag, .geom, .tesc, .tese, .comp, .wgsl files.
+    Automatically downloads shader-language-server binary.
+    """
     SYSTEMVERILOG = "systemverilog"
     """SystemVerilog language server using verible-verilog-ls.
     Supports .sv, .svh, .v, .vh files.
     Automatically downloads verible binary.
+    """
+    SOLIDITY = "solidity"
+    """Solidity language server using the Nomic Foundation Solidity Language Server
+    (@nomicfoundation/solidity-language-server).
+    Supports .sol files. Provides go-to-definition, find references, document symbols,
+    hover, and diagnostics. Requires Node.js and npm.
+    Works best with a foundry.toml or hardhat.config.js in the project root.
+    """
+    ANSIBLE = "ansible"
+    """Ansible language server (experimental) using @ansible/ansible-language-server.
+    Supports *.yaml and *.yml files (same extensions as YAML, hence experimental).
+    Must be explicitly specified in project.yml. Requires Node.js and npm.
+    Requires ``ansible`` in PATH for full functionality.
     """
 
     @classmethod
@@ -127,8 +154,10 @@ class Language(str, Enum):
         in the project.yml configuration.
         """
         return self in {
+            self.ANSIBLE,
             self.TYPESCRIPT_VTS,
             self.PYTHON_JEDI,
+            self.PYTHON_TY,
             self.CSHARP_OMNISHARP,
             self.RUBY_SOLARGRAPH,
             self.PHP_PHPACTOR,
@@ -138,6 +167,7 @@ class Language(str, Enum):
             self.GROOVY,
             self.CPP_CCLS,
             self.IVY,
+            self.SOLIDITY,
         }
 
     def __str__(self) -> str:
@@ -162,7 +192,7 @@ class Language(str, Enum):
 
     def get_source_fn_matcher(self) -> FilenameMatcher:
         match self:
-            case self.PYTHON | self.PYTHON_JEDI:
+            case self.PYTHON | self.PYTHON_JEDI | self.PYTHON_TY:
                 return FilenameMatcher("*.py", "*.pyi")
             case self.JAVA:
                 return FilenameMatcher("*.java")
@@ -216,10 +246,14 @@ class Language(str, Enum):
                 return FilenameMatcher("*.zig", "*.zon")
             case self.LUA:
                 return FilenameMatcher("*.lua")
+            case self.LUAU:
+                return FilenameMatcher("*.luau")
             case self.NIX:
                 return FilenameMatcher("*.nix")
             case self.ERLANG:
                 return FilenameMatcher("*.erl", "*.hrl", "*.escript", "*.config", "*.app", "*.app.src")
+            case self.OCAML:
+                return FilenameMatcher("*.ml", "*.mli", "*.re", "*.rei")
             case self.AL:
                 return FilenameMatcher("*.al", "*.dal")
             case self.IVY:
@@ -240,6 +274,8 @@ class Language(str, Enum):
                 )
             case self.HASKELL:
                 return FilenameMatcher("*.hs", "*.lhs")
+            case self.LEAN4:
+                return FilenameMatcher("*.lean")
             case self.VUE:
                 path_patterns = ["*.vue"]
                 for prefix in ["c", "m", ""]:
@@ -255,8 +291,30 @@ class Language(str, Enum):
                 return FilenameMatcher("*.groovy", "*.gvy")
             case self.MATLAB:
                 return FilenameMatcher("*.m", "*.mlx", "*.mlapp")
+            case self.HLSL:
+                return FilenameMatcher(
+                    "*.hlsl",
+                    "*.hlsli",
+                    "*.fx",
+                    "*.fxh",
+                    "*.cginc",
+                    "*.compute",
+                    "*.shader",
+                    "*.glsl",
+                    "*.vert",
+                    "*.frag",
+                    "*.geom",
+                    "*.tesc",
+                    "*.tese",
+                    "*.comp",
+                    "*.wgsl",
+                )
             case self.SYSTEMVERILOG:
                 return FilenameMatcher("*.sv", "*.svh", "*.v", "*.vh")
+            case self.SOLIDITY:
+                return FilenameMatcher("*.sol")
+            case self.ANSIBLE:
+                return FilenameMatcher("*.yaml", "*.yml")
             case _:
                 raise ValueError(f"Unhandled language: {self}")
 
@@ -270,6 +328,10 @@ class Language(str, Enum):
                 from solidlsp.language_servers.jedi_server import JediServer
 
                 return JediServer
+            case self.PYTHON_TY:
+                from solidlsp.language_servers.ty_server import TyLanguageServer
+
+                return TyLanguageServer
             case self.JAVA:
                 from solidlsp.language_servers.eclipse_jdtls import EclipseJDTLS
 
@@ -382,10 +444,20 @@ class Language(str, Enum):
                 from solidlsp.language_servers.lua_ls import LuaLanguageServer
 
                 return LuaLanguageServer
+
+            case self.LUAU:
+                from solidlsp.language_servers.luau_lsp import LuauLanguageServer
+
+                return LuauLanguageServer
+
             case self.ERLANG:
                 from solidlsp.language_servers.erlang_language_server import ErlangLanguageServer
 
                 return ErlangLanguageServer
+            case self.OCAML:
+                from solidlsp.language_servers.ocaml_lsp_server import OcamlLanguageServer
+
+                return OcamlLanguageServer
             case self.AL:
                 from solidlsp.language_servers.al_language_server import ALLanguageServer
 
@@ -422,6 +494,10 @@ class Language(str, Enum):
                 from solidlsp.language_servers.haskell_language_server import HaskellLanguageServer
 
                 return HaskellLanguageServer
+            case self.LEAN4:
+                from solidlsp.language_servers.lean4_language_server import Lean4LanguageServer
+
+                return Lean4LanguageServer
             case self.FSHARP:
                 from solidlsp.language_servers.fsharp_language_server import FSharpLanguageServer
 
@@ -442,10 +518,22 @@ class Language(str, Enum):
                 from solidlsp.language_servers.matlab_language_server import MatlabLanguageServer
 
                 return MatlabLanguageServer
+            case self.HLSL:
+                from solidlsp.language_servers.hlsl_language_server import HlslLanguageServer
+
+                return HlslLanguageServer
             case self.SYSTEMVERILOG:
                 from solidlsp.language_servers.systemverilog_server import SystemVerilogLanguageServer
 
                 return SystemVerilogLanguageServer
+            case self.SOLIDITY:
+                from solidlsp.language_servers.solidity_language_server import SolidityLanguageServer
+
+                return SolidityLanguageServer
+            case self.ANSIBLE:
+                from solidlsp.language_servers.ansible_language_server import AnsibleLanguageServer
+
+                return AnsibleLanguageServer
             case _:
                 raise ValueError(f"Unhandled language: {self}")
 

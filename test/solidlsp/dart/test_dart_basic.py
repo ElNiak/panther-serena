@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from serena.util.text_utils import find_text_coordinates
 from solidlsp import SolidLanguageServer
 from solidlsp.ls_config import Language
 from solidlsp.ls_types import SymbolKind
@@ -196,9 +197,9 @@ class TestDartLanguageServer:
         refs = language_server.request_references(file_path, sel_start["line"], sel_start["character"])
 
         # Check that we found references - at least one should be in main.dart
-        assert any(
-            "main.dart" in ref.get("relativePath", "") or "main.dart" in ref.get("uri", "") for ref in refs
-        ), "main.dart should reference add method (tried all positions in selectionRange)"
+        assert any("main.dart" in ref.get("relativePath", "") or "main.dart" in ref.get("uri", "") for ref in refs), (
+            "main.dart should reference add method (tried all positions in selectionRange)"
+        )
 
     @pytest.mark.parametrize("language_server", [Language.DART], indirect=True)
     def test_request_containing_symbol_method(self, language_server: SolidLanguageServer) -> None:
@@ -243,8 +244,12 @@ class TestDartLanguageServer:
     def test_request_defining_symbol_variable(self, language_server: SolidLanguageServer) -> None:
         """Test request_defining_symbol for a variable usage."""
         file_path = os.path.join("lib", "main.dart")
-        # Line 14 contains 'final result = a + b;' - test position on 'result'
-        defining_symbol = language_server.request_defining_symbol(file_path, 13, 10)
+
+        # Find coordinates of 'final result = a + b;' - test position on 'result'
+        with language_server.open_file(file_path, open_in_ls=False) as f:
+            pos = find_text_coordinates(f.contents, r"final (result) = a \+ b;")
+
+        defining_symbol = language_server.request_defining_symbol(file_path, pos.line, pos.col)
 
         # The defining symbol might be the variable itself or the containing method
         # This is acceptable behavior - different language servers handle this differently

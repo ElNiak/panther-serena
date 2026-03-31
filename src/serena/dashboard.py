@@ -5,7 +5,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Self
 
-from flask import Flask, Response, request, send_from_directory
+from flask import Flask, Response, redirect, request, send_from_directory
 from pydantic import BaseModel
 from sensai.util import logging
 
@@ -89,6 +89,11 @@ class RequestDeleteMemory(BaseModel):
     memory_name: str
 
 
+class RequestRenameMemory(BaseModel):
+    old_name: str
+    new_name: str
+
+
 class ResponseGetSerenaConfig(BaseModel):
     content: str
 
@@ -143,6 +148,10 @@ class SerenaDashboardAPI:
         return self._memory_log_handler
 
     def _setup_routes(self) -> None:
+        @self._app.route("/")
+        def redirect_to_dashboard() -> Response:
+            return redirect("/dashboard/")  # type: ignore[return-value]
+
         # Static files
         @self._app.route("/dashboard/<path:filename>")
         def serve_dashboard(filename: str) -> Response:
@@ -269,6 +278,18 @@ class SerenaDashboardAPI:
             except Exception as e:
                 return {"status": "error", "message": str(e)}
 
+        @self._app.route("/rename_memory", methods=["POST"])
+        def rename_memory() -> dict[str, str]:
+            request_data = request.get_json()
+            if not request_data:
+                return {"status": "error", "message": "No data provided"}
+            request_rename_memory = RequestRenameMemory.model_validate(request_data)
+            try:
+                result_message = self._rename_memory(request_rename_memory)
+                return {"status": "success", "message": result_message}
+            except Exception as e:
+                return {"status": "error", "message": str(e)}
+
         @self._app.route("/get_serena_config", methods=["GET"])
         def get_serena_config() -> dict[str, Any]:
             try:
@@ -347,6 +368,8 @@ class SerenaDashboardAPI:
                     return post_installation_news_ids
                 with open(news_snippet_id_file, encoding="utf-8") as f:
                     last_read_news_id = int(f.read().strip())
+                    if last_read_news_id == 20262103:
+                        last_read_news_id = 20260321  # fix originally misnamed file
                 return [news_id for news_id in post_installation_news_ids if news_id > last_read_news_id]
 
             try:
@@ -484,7 +507,7 @@ class SerenaDashboardAPI:
         # Get available memories if ReadMemoryTool is active
         available_memories = None
         if self._agent.tool_is_active("read_memory") and project is not None:
-            available_memories = project.memories_manager.list_memories()
+            available_memories = project.memories_manager.list_memories().get_full_list()
 
         # Get list of languages for the active project
         languages = []
@@ -507,7 +530,7 @@ class SerenaDashboardAPI:
             available_modes=available_modes,
             available_contexts=available_contexts,
             available_memories=available_memories,
-            jetbrains_mode=not self._agent.is_using_language_server(),
+            jetbrains_mode=self._agent.get_language_backend().is_jetbrains(),
             languages=languages,
             encoding=encoding,
             current_client=Tool.get_last_tool_call_client_str(),
@@ -526,7 +549,7 @@ class SerenaDashboardAPI:
         from solidlsp.ls_config import Language
 
         def run() -> ResponseAvailableLanguages:
-            all_languages = [lang.value for lang in Language.iter_all(include_experimental=False)]
+            all_languages = [lang.value for lang in Language.iter_all(include_experimental=True)]
 
             # Filter out already added languages for the active project
             project = self._agent.get_active_project()
@@ -556,8 +579,7 @@ class SerenaDashboardAPI:
             project = self._agent.get_active_project()
             if project is None:
                 raise ValueError("No active project")
-
-            project.memories_manager.save_memory(request_save_memory.memory_name, request_save_memory.content)
+            project.memories_manager.save_memory(request_save_memory.memory_name, request_save_memory.content, is_tool_context=False)
 
         self._agent.execute_task(run, logged=True, name="SaveMemory")
 
@@ -566,10 +588,21 @@ class SerenaDashboardAPI:
             project = self._agent.get_active_project()
             if project is None:
                 raise ValueError("No active project")
-
-            project.memories_manager.delete_memory(request_delete_memory.memory_name)
+            project.memories_manager.delete_memory(request_delete_memory.memory_name, is_tool_context=False)
 
         self._agent.execute_task(run, logged=True, name="DeleteMemory")
+
+    def _rename_memory(self, request_rename_memory: RequestRenameMemory) -> str:
+        def run() -> str:
+            project = self._agent.get_active_project()
+            if project is None:
+                raise ValueError("No active project")
+
+            return project.memories_manager.move_memory(
+                request_rename_memory.old_name, request_rename_memory.new_name, is_tool_context=False
+            )
+
+        return self._agent.execute_task(run, logged=True, name="RenameMemory")
 
     def _get_serena_config(self) -> ResponseGetSerenaConfig:
         config_path = self._agent.serena_config.config_file_path

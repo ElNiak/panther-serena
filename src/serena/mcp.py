@@ -270,7 +270,7 @@ class SerenaMCPFactory:
 
     def create_mcp_server(
         self,
-        host: str = "0.0.0.0",
+        host: str = "127.0.0.1",
         port: int = 8000,
         modes: Sequence[str] = (),
         language_backend: LanguageBackend | None = None,
@@ -341,8 +341,12 @@ class SerenaMCPFactory:
         openai_tool_compatible = self.context.name in ["chatgpt", "codex", "oaicompat-agent"]
         self._set_mcp_tools(mcp_server, openai_tool_compatible=openai_tool_compatible)
         log.info("MCP server lifetime setup complete")
-        yield
-        log.info("MCP server shutting down")
+        try:
+            yield
+        finally:
+            log.info("MCP server shutting down")
+            if self.agent is not None:
+                self.agent.shutdown()
 
     def _get_initial_instructions(self) -> str:
         assert self.agent is not None

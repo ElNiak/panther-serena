@@ -68,12 +68,12 @@ class CreateTextFileTool(Tool, ToolMarkerCanEdit):
         if will_overwrite_existing:
             self.project.validate_relative_path(relative_path, require_not_ignored=True)
         else:
-            assert abs_path.is_relative_to(
-                self.get_project_root()
-            ), f"Cannot create file outside of the project directory, got {relative_path=}"
+            assert abs_path.is_relative_to(self.get_project_root()), (
+                f"Cannot create file outside of the project directory, got {relative_path=}"
+            )
 
         abs_path.parent.mkdir(parents=True, exist_ok=True)
-        abs_path.write_text(content, encoding=self.project.project_config.encoding)
+        abs_path.write_text(content, encoding=self.project.project_config.encoding, newline=self.project.line_ending.newline_str)
         answer = f"File created: {relative_path}."
         if will_overwrite_existing:
             answer += " Overwrote existing file."
@@ -192,10 +192,8 @@ class ReplaceContentTool(Tool, ToolMarkerCanEdit):
             If mode is "regex", the string can contain backreferences to matched groups in the needle regex,
             specified using the syntax $!1, $!2, etc. for groups 1, 2, etc.
         :param mode: either "literal" or "regex", specifying how the `needle` parameter is to be interpreted.
-        :param allow_multiple_occurrences: if True, the regex may match multiple occurrences in the file
-            and all of them will be replaced.
-            If this is set to False and the regex matches multiple occurrences, an error will be returned
-            (and you may retry with a revised, more specific regex).
+        :param allow_multiple_occurrences: whether to allow matching and replacing multiple occurrences.
+            If false and multiple occurrences are found, an error will be returned
         """
         return self.replace_content(
             relative_path, needle, repl, mode=mode, allow_multiple_occurrences=allow_multiple_occurrences, require_not_ignored=True
@@ -406,6 +404,8 @@ class SearchForPatternTool(Tool):
             matches = search_files(
                 rel_paths_to_search,
                 substring_pattern,
+                context_lines_before=context_lines_before,
+                context_lines_after=context_lines_after,
                 file_reader=self.project.read_file,
                 root_path=self.get_project_root(),
                 paths_include_glob=paths_include_glob,
@@ -416,5 +416,26 @@ class SearchForPatternTool(Tool):
         for match in matches:
             assert match.source_file_path is not None
             file_to_matches[match.source_file_path].append(match.to_display_string())
+
+        # capture lightweight match data for shortening before serialization
+        match_lines_by_file: dict[str, list[int]] = defaultdict(list)
+        for match in matches:
+            assert match.source_file_path is not None
+            match_lines_by_file[match.source_file_path].append(match.matched_lines[0].line_number)
+
+        # shortened result closures, from least to most aggressive shortening
+        def make_lines_only() -> str:
+            """Match locations without surrounding context"""
+            return f"Match lines per file:\n{self._to_json(match_lines_by_file)}"
+
+        def make_per_file_counts() -> str:
+            counts = {path: len(lines) for path, lines in match_lines_by_file.items()}
+            return f"Match counts per file:\n{self._to_json(counts)}"
+
+        def make_summary() -> str:
+            return f"Found {len(matches)} matches in {len(match_lines_by_file)} files."
+
         result = self._to_json(file_to_matches)
-        return self._limit_length(result, max_answer_chars)
+        return self._limit_length(
+            result, max_answer_chars, shortened_result_factories=[make_lines_only, make_per_file_counts, make_summary]
+        )

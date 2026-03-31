@@ -15,13 +15,13 @@ from typing import Any
 from overrides import override
 
 from solidlsp import ls_types
-from solidlsp.language_servers.common import RuntimeDependency, RuntimeDependencyCollection
+from solidlsp.language_servers.common import RuntimeDependency, RuntimeDependencyCollection, build_npm_install_command
 from solidlsp.language_servers.typescript_language_server import (
     TypeScriptLanguageServer,
     prefer_non_node_modules_definition,
 )
 from solidlsp.ls import LSPFileBuffer, SolidLanguageServer
-from solidlsp.ls_config import Language, LanguageServerConfig
+from solidlsp.ls_config import FilenameMatcher, Language, LanguageServerConfig
 from solidlsp.ls_exceptions import SolidLSPException
 from solidlsp.ls_types import Location
 from solidlsp.ls_utils import PathUtils
@@ -46,6 +46,11 @@ class VueTypeScriptServer(TypeScriptLanguageServer):
         with the TypeScript language server infrastructure.
         """
         return Language.TYPESCRIPT
+
+    def get_source_fn_matcher(self) -> FilenameMatcher:
+        # must override with Vue-specific matcher to ensure .vue files are included (as they can be discovered via references,
+        # for instance; otherwise, we may find references in .vue files but then filter the results out, because .vue files are ignored.)
+        return Language.VUE.get_source_fn_matcher()
 
     class DependencyProvider(TypeScriptLanguageServer.DependencyProvider):
         override_ts_ls_executable: str | None = None
@@ -134,8 +139,6 @@ class VueLanguageServer(SolidLanguageServer):
 
     TS_SERVER_READY_TIMEOUT = 5.0
     VUE_SERVER_READY_TIMEOUT = 3.0
-    # Windows requires more time due to slower I/O and process operations.
-    VUE_INDEXING_WAIT_TIME = 4.0 if os.name == "nt" else 2.0
 
     def __init__(self, config: LanguageServerConfig, repository_root_path: str, solidlsp_settings: SolidLSPSettings):
         vue_lsp_executable_path, self.tsdk_path, self._ts_ls_cmd = self._setup_runtime_dependencies(config, solidlsp_settings)
@@ -204,6 +207,11 @@ class VueLanguageServer(SolidLanguageServer):
         vue_files = self._find_all_vue_files()
         log.debug(f"Found {len(vue_files)} .vue files to index")
 
+        # Prepare the TS server to track new $/progress notifications triggered
+        # by the didOpen calls below. Must happen BEFORE opening files to avoid
+        # a race where progress begins and ends before we start waiting.
+        self._ts_server.expect_indexing()
+
         for vue_file in vue_files:
             try:
                 with self._ts_server.open_file(vue_file) as file_buffer:
@@ -213,13 +221,23 @@ class VueLanguageServer(SolidLanguageServer):
                 log.debug(f"Failed to open {vue_file} on TS server: {e}")
 
         self._vue_files_indexed = True
-        log.info("Vue file indexing on TypeScript server complete")
+        log.info("Vue file indexing on TypeScript server complete, waiting for TS server to finish processing")
 
-        sleep(self._get_vue_indexing_wait_time())
-        log.debug("Wait period after Vue file indexing complete")
+        self._wait_for_ts_indexing_complete()
 
-    def _get_vue_indexing_wait_time(self) -> float:
-        return self.VUE_INDEXING_WAIT_TIME
+    def _wait_for_ts_indexing_complete(self) -> None:
+        """Wait for the companion TypeScript server to finish processing opened Vue files.
+
+        Uses the $/progress tracking in TypeScriptLanguageServer: after Vue files are
+        opened, tsserver sends "Initializing JS/TS language features…" progress.
+        We wait for all progress tokens to complete, with a timeout fallback.
+        """
+        assert self._ts_server is not None
+        timeout = TypeScriptLanguageServer.INDEXING_PROGRESS_TIMEOUT
+        if self._ts_server.wait_for_indexing(timeout=timeout):
+            log.info("TypeScript server finished indexing Vue files (signaled via $/progress)")
+        else:
+            log.warning(f"Timeout ({timeout}s) waiting for TypeScript server to finish indexing Vue files, proceeding anyway")
 
     def _send_references_request(self, relative_file_path: str, line: int, column: int) -> list[lsp_types.Location] | None:
         uri = PathUtils.path_to_uri(os.path.join(self.repository_root_path, relative_file_path))
@@ -394,31 +412,26 @@ class VueLanguageServer(SolidLanguageServer):
         typescript_language_server_version = typescript_config.get("typescript_language_server_version", "5.1.3")
         vue_config = solidlsp_settings.get_ls_specific_settings(Language.VUE)
         vue_language_server_version = vue_config.get("vue_language_server_version", "3.1.5")
+        npm_registry = vue_config.get("npm_registry", typescript_config.get("npm_registry"))
 
         deps = RuntimeDependencyCollection(
             [
                 RuntimeDependency(
                     id="vue-language-server",
                     description="Vue language server package (Volar)",
-                    command=["npm", "install", "--prefix", "./", f"@vue/language-server@{vue_language_server_version}"],
+                    command=build_npm_install_command("@vue/language-server", vue_language_server_version, npm_registry),
                     platform_id="any",
                 ),
                 RuntimeDependency(
                     id="typescript",
                     description="TypeScript (required for tsdk)",
-                    command=["npm", "install", "--prefix", "./", f"typescript@{typescript_version}"],
+                    command=build_npm_install_command("typescript", typescript_version, npm_registry),
                     platform_id="any",
                 ),
                 RuntimeDependency(
                     id="typescript-language-server",
                     description="TypeScript language server (for Vue LS 3.x tsserver forwarding)",
-                    command=[
-                        "npm",
-                        "install",
-                        "--prefix",
-                        "./",
-                        f"typescript-language-server@{typescript_language_server_version}",
-                    ],
+                    command=build_npm_install_command("typescript-language-server", typescript_language_server_version, npm_registry),
                     platform_id="any",
                 ),
             ]
