@@ -106,8 +106,8 @@ class GetSymbolsOverviewTool(Tool, ToolMarkerSymbolicRead):
         symbols = symbol_retriever.get_symbol_overview(relative_path)[relative_path]
 
         if local_only:
-            normalized = os.path.normpath(relative_path)
-            symbols = [s for s in symbols if s.relative_path is None or os.path.normpath(s.relative_path) == normalized]
+            line_count = sum(1 for _ in open(file_path, encoding="utf-8"))
+            symbols = [s for s in symbols if s.line is None or s.line < line_count]
 
         def child_inclusion_predicate(s: LanguageServerSymbol) -> bool:
             return not s.is_low_level()
