@@ -36,7 +36,7 @@ class GetSymbolsOverviewTool(Tool, ToolMarkerSymbolicRead):
 
     symbol_dict_grouper = LanguageServerSymbolDictGrouper(["kind"], ["kind"], collapse_singleton=True)
 
-    def apply(self, relative_path: str, depth: int = 0, max_answer_chars: int = -1) -> str:
+    def apply(self, relative_path: str, depth: int = 0, local_only: bool = False, max_answer_chars: int = -1) -> str:
         """
         Use this tool to get a high-level understanding of the code symbols in a file.
         This should be the first tool to call when you want to understand a new file, unless you already know
@@ -45,12 +45,14 @@ class GetSymbolsOverviewTool(Tool, ToolMarkerSymbolicRead):
         :param relative_path: the relative path to the file to get the overview of
         :param depth: depth up to which descendants of top-level symbols shall be retrieved
             (e.g. 1 retrieves immediate children). Default 0.
+        :param local_only: if True, only return symbols defined in the requested file,
+            excluding symbols from transitive includes. Default False.
         :param max_answer_chars: if the overview is longer than this number of characters,
             no content will be returned. -1 means the default value from the config will be used.
             Don't adjust unless there is really no other way to get the content required for the task.
         :return: a JSON object containing symbols grouped by kind in a compact format.
         """
-        result = self.get_symbol_overview(relative_path, depth=depth)
+        result = self.get_symbol_overview(relative_path, depth=depth, local_only=local_only)
 
         # capture kind names and depth-0 snapshots before grouping, which mutates the dicts
         kind_names = [d.get("kind", "unknown") for d in result]
@@ -78,10 +80,13 @@ class GetSymbolsOverviewTool(Tool, ToolMarkerSymbolicRead):
 
         return self._limit_length(result_json_str, max_answer_chars, shortened_result_factories=shortened_results)
 
-    def get_symbol_overview(self, relative_path: str, depth: int = 0) -> list[LanguageServerSymbol.OutputDict]:
+    def get_symbol_overview(
+        self, relative_path: str, depth: int = 0, local_only: bool = False
+    ) -> list[LanguageServerSymbol.OutputDict]:
         """
         :param relative_path: relative path to a source file
         :param depth: the depth up to which descendants shall be retrieved
+        :param local_only: if True, filter out symbols not defined in the requested file
         :return: a list of symbol dictionaries representing the symbol overview of the file
         """
         symbol_retriever = self.create_language_server_symbol_retriever()
@@ -99,6 +104,10 @@ class GetSymbolsOverviewTool(Tool, ToolMarkerSymbolicRead):
             )
 
         symbols = symbol_retriever.get_symbol_overview(relative_path)[relative_path]
+
+        if local_only:
+            normalized = os.path.normpath(relative_path)
+            symbols = [s for s in symbols if s.relative_path is None or os.path.normpath(s.relative_path) == normalized]
 
         def child_inclusion_predicate(s: LanguageServerSymbol) -> bool:
             return not s.is_low_level()
