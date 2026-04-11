@@ -1,6 +1,4 @@
-# CLAUDE.md
-
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+# panther-serena — Serena MCP Server Integration
 
 ## Development Commands
 
@@ -90,7 +88,7 @@ Each supported language has:
 
 ## Configuration Hierarchy
 
-Configuration is loaded from (in order of precedence):
+Configuration loads from (in order of precedence):
 1. Command-line arguments to `serena-mcp-server`
 2. Project-specific `.serena/project.yml`
 3. User config `~/.serena/serena_config.yml`
